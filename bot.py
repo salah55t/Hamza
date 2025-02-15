@@ -14,6 +14,24 @@ from sklearn.model_selection import train_test_split
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# ---------------------- إعدادات التداول اليومي ----------------------
+# نستخدم بيانات الشموع بمدة 15 دقيقة وجمع بيانات اليوم الواحد
+BASE_INTERVAL = '15m'
+HISTORICAL_DAYS = 1
+
+# إعدادات المؤشرات (يمكن تعديلها حسب الاستراتيجية)
+RSI_PERIOD = 14
+ATR_PERIOD = 10
+ICHIMOKU_TENKAN = 7
+ICHIMOKU_KIJUN = 21
+ICHIMOKU_SENKOU = 42
+ICHIMOKU_DISPLACEMENT = 21
+SMA_PERIOD_SHORT = 8    # متوسط متحرك بسيط للفترة القصيرة
+SMA_PERIOD_LONG = 16    # متوسط متحرك بسيط للفترة الطويلة
+EMA_PERIOD_SHORT = 8    # متوسط متحرك أسي للفترة القصيرة
+EMA_PERIOD_LONG = 16    # متوسط متحرك أسي للفترة الطويلة
+MOMENTUM_PERIOD = 8     # فترة حساب الزخم
+
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -166,10 +184,10 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='5m', days=3):
-    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات."""
+def fetch_historical_data(symbol, interval=BASE_INTERVAL, days=HISTORICAL_DAYS):
+    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات باستخدام الفريم المناسب."""
     try:
-        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
+        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -198,14 +216,16 @@ def fetch_recent_volume(symbol):
         return 0
 
 def calculate_volatility(df):
-    """حساب التقلب باستخدام بيانات الإغلاق فقط."""
+    """حساب التقلب باستخدام بيانات الإغلاق فقط مع تعديل الفريم (15m)."""
     df['returns'] = df['close'].pct_change()
-    vol = df['returns'].std() * np.sqrt(24 * 60 / 5) * 100
+    # معامل تحويل يعتمد على 15 دقيقة (24 ساعة = 96 شمعه)
+    vol = df['returns'].std() * np.sqrt(24 * 60 / 15) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
 
-def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
-    """حساب مؤشر الاشموكو."""
+def calculate_ichimoku(df, tenkan=ICHIMOKU_TENKAN, kijun=ICHIMOKU_KIJUN,
+                       senkou_b=ICHIMOKU_SENKOU, displacement=ICHIMOKU_DISPLACEMENT):
+    """حساب مؤشر الاشموكو باستخدام معاملات مخصصة للتداول اليومي."""
     logger.info("بدء حساب مؤشر الاشموكو")
     period9_high = df['high'].rolling(window=tenkan).max()
     period9_low = df['low'].rolling(window=tenkan).min()
@@ -221,8 +241,8 @@ def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
     logger.info("انتهى حساب مؤشر الاشموكو")
     return df
 
-def calculate_rsi(df, period=14):
-    """حساب مؤشر RSI."""
+def calculate_rsi(df, period=RSI_PERIOD):
+    """حساب مؤشر RSI للفريم اليومي."""
     logger.info("بدء حساب مؤشر RSI")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -235,8 +255,8 @@ def calculate_rsi(df, period=14):
     logger.info(f"تم حساب RSI: {last_rsi:.2f}")
     return rsi
 
-def calculate_atr(df, period=14):
-    """حساب مؤشر ATR (متوسط المدى الحقيقي)."""
+def calculate_atr(df, period=ATR_PERIOD):
+    """حساب مؤشر ATR (متوسط المدى الحقيقي) للفريم اليومي."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -245,7 +265,7 @@ def calculate_atr(df, period=14):
     logger.info(f"تم حساب ATR: {atr:.8f}")
     return atr
 
-def calculate_atr_series(df, period=14):
+def calculate_atr_series(df, period=ATR_PERIOD):
     """حساب سلسلة ATR لكل صف."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
@@ -257,31 +277,31 @@ def calculate_atr_series(df, period=14):
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية.
-    يعتمد النموذج على بيانات تاريخية ويستخدم عدة مؤشرات لتحديد الهدف ووقف الخسارة.
+    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية،
+    مع استخدام إعدادات مؤشرات مخصصة للتداول اليومي.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
         df = df.dropna().reset_index(drop=True)
-        if len(df) < 100:
+        if len(df) < 50:
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الفنية الإضافية
+        # حساب الميزات الفنية مع استخدام الفريمات اليومية المخصصة
         df['prev_close'] = df['close'].shift(1)
-        df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
-        df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
-        df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
-        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
-        df['rsi_feature'] = calculate_rsi(df).shift(1)
-        df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
-        df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
-        df['momentum'] = df['close'] - df['close'].shift(10)
+        df['sma_short'] = df['close'].rolling(window=SMA_PERIOD_SHORT).mean().shift(1)
+        df['sma_long'] = df['close'].rolling(window=SMA_PERIOD_LONG).mean().shift(1)
+        df['ema_short'] = df['close'].ewm(span=EMA_PERIOD_SHORT, adjust=False).mean().shift(1)
+        df['ema_long'] = df['close'].ewm(span=EMA_PERIOD_LONG, adjust=False).mean().shift(1)
+        df['rsi_feature'] = calculate_rsi(df, period=RSI_PERIOD).shift(1)
+        df['atr_feature'] = calculate_atr_series(df, period=ATR_PERIOD).shift(1)
+        df['volatility'] = df['close'].pct_change().rolling(window=SMA_PERIOD_SHORT).std().shift(1)
+        df['momentum'] = df['close'] - df['close'].shift(MOMENTUM_PERIOD)
         
-        features = ['prev_close', 'sma10', 'sma20', 'ema10', 'ema20',
+        features = ['prev_close', 'sma_short', 'sma_long', 'ema_short', 'ema_long',
                     'rsi_feature', 'atr_feature', 'volatility', 'momentum']
         df_features = df.dropna().reset_index(drop=True)
-        if len(df_features) < 50:
+        if len(df_features) < 20:
             logger.warning(f"بيانات الميزات لـ {symbol} غير كافية")
             return None
 
@@ -311,7 +331,7 @@ def generate_signal_improved(df, symbol):
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
         current_price = df['close'].iloc[-1]
-        current_atr = calculate_atr(df, period=14)
+        current_atr = calculate_atr(df, period=ATR_PERIOD)
         if current_atr / current_price > 0.03:
             logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S = {current_atr/current_price:.4f})")
             return None
@@ -623,7 +643,7 @@ def analyze_market():
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
             df = fetch_historical_data(symbol)
-            if df is None or len(df) < 100:
+            if df is None or len(df) < 20:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
             volume_15m = fetch_recent_volume(symbol)
@@ -641,7 +661,7 @@ def analyze_market():
             if last_row['tenkan_sen'] <= last_row['kijun_sen']:
                 logger.info(f"تجاهل {symbol} - تقاطع مؤشر الاشموكو غير صعودي")
                 continue
-            rsi_series = calculate_rsi(df)
+            rsi_series = calculate_rsi(df, period=RSI_PERIOD)
             last_rsi = rsi_series.iloc[-1]
             if last_rsi > 30:
                 logger.info(f"تجاهل {symbol} - شرط RSI غير مستوفى (RSI = {last_rsi:.2f})")
