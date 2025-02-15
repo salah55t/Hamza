@@ -10,16 +10,16 @@ from threading import Thread
 import logging
 import requests
 import json  # لاستخدام reply_markup في تنبيهات Telegram
-from sklearn.model_selection import train_test_split
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
+from sklearn.metrics import r2_score
 
 # ---------------------- إعدادات التداول اليومي ----------------------
-# نستخدم بيانات الشموع بمدة 15 دقيقة وجمع بيانات اليوم الواحد
+# استخدام بيانات الشموع بمدة 15 دقيقة وجمع بيانات اليوم الواحد
 BASE_INTERVAL = '15m'
 HISTORICAL_DAYS = 1
 
-# إعدادات المؤشرات (يمكن تعديلها حسب الاستراتيجية)
+# إعدادات المؤشرات الخاصة بالتداول اليومي
 RSI_PERIOD = 14
 ATR_PERIOD = 10
 ICHIMOKU_TENKAN = 7
@@ -172,7 +172,19 @@ def set_telegram_webhook():
     except Exception as e:
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
 
-# ---------------------- وظائف تحليل البيانات والمؤشرات ----------------------
+# ---------------------- دوال حساب المؤشرات الفنية ----------------------
+def calculate_macd(df, fast_period=12, slow_period=26, signal_period=9):
+    """حساب مؤشر MACD ومكوناته وإضافتها للـ DataFrame."""
+    ema_fast = df['close'].ewm(span=fast_period, adjust=False).mean()
+    ema_slow = df['close'].ewm(span=slow_period, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+    histogram = macd_line - signal_line
+    df['macd'] = macd_line
+    df['macd_signal'] = signal_line
+    df['macd_hist'] = histogram
+    return df
+
 def get_crypto_symbols():
     """قراءة الأزواج من الملف وإضافة USDT."""
     try:
@@ -218,7 +230,7 @@ def fetch_recent_volume(symbol):
 def calculate_volatility(df):
     """حساب التقلب باستخدام بيانات الإغلاق فقط مع تعديل الفريم (15m)."""
     df['returns'] = df['close'].pct_change()
-    # معامل تحويل يعتمد على 15 دقيقة (24 ساعة = 96 شمعه)
+    # معامل تحويل يعتمد على شمعات 15 دقيقة (96 شمعه في اليوم)
     vol = df['returns'].std() * np.sqrt(24 * 60 / 15) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
@@ -278,16 +290,16 @@ def calculate_atr_series(df, period=ATR_PERIOD):
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية،
-    مع استخدام إعدادات مؤشرات مخصصة للتداول اليومي.
+    باستخدام إعدادات مؤشرات مُحسّنة للتداول اليومي.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
         df = df.dropna().reset_index(drop=True)
-        if len(df) < 50:
+        if len(df) < 20:
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الفنية مع استخدام الفريمات اليومية المخصصة
+        # حساب الميزات الفنية الأساسية
         df['prev_close'] = df['close'].shift(1)
         df['sma_short'] = df['close'].rolling(window=SMA_PERIOD_SHORT).mean().shift(1)
         df['sma_long'] = df['close'].rolling(window=SMA_PERIOD_LONG).mean().shift(1)
@@ -297,9 +309,11 @@ def generate_signal_improved(df, symbol):
         df['atr_feature'] = calculate_atr_series(df, period=ATR_PERIOD).shift(1)
         df['volatility'] = df['close'].pct_change().rolling(window=SMA_PERIOD_SHORT).std().shift(1)
         df['momentum'] = df['close'] - df['close'].shift(MOMENTUM_PERIOD)
-        
+        # حساب MACD وإضافته كميزات
+        df = calculate_macd(df)
         features = ['prev_close', 'sma_short', 'sma_long', 'ema_short', 'ema_long',
-                    'rsi_feature', 'atr_feature', 'volatility', 'momentum']
+                    'rsi_feature', 'atr_feature', 'volatility', 'momentum',
+                    'macd', 'macd_signal', 'macd_hist']
         df_features = df.dropna().reset_index(drop=True)
         if len(df_features) < 20:
             logger.warning(f"بيانات الميزات لـ {symbol} غير كافية")
@@ -308,7 +322,10 @@ def generate_signal_improved(df, symbol):
         X = df_features[features]
         y = df_features['close']
 
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        # تقسيم البيانات بطريقة زمنية (بدون خلط)
+        split_idx = int(0.8 * len(X))
+        X_train, X_test = X[:split_idx], X[split_idx:]
+        y_train, y_test = y[:split_idx], y[split_idx:]
 
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
@@ -326,15 +343,14 @@ def generate_signal_improved(df, symbol):
         ])
 
         voting_reg.fit(X_train, y_train)
-        score = voting_reg.score(X_test, y_test)
+        y_pred = voting_reg.predict(X_test)
+        score = r2_score(y_test, y_pred)
         confidence = round(score * 100, 2)
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
         current_price = df['close'].iloc[-1]
         current_atr = calculate_atr(df, period=ATR_PERIOD)
-        if current_atr / current_price > 0.03:
-            logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S = {current_atr/current_price:.4f})")
-            return None
+        # تمت إزالة شرط تجاوز الإشارة في حال كان التقلب مرتفعًا
 
         # تحديد الهدف ووقف الخسارة باستخدام مضاعفات ATR
         atr_multiplier_target = 1.5
