@@ -15,9 +15,15 @@ from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # مكتبات التعلم العميق لنموذج LSTM
+import tensorflow as tf
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from sklearn.preprocessing import MinMaxScaler
+
+# تعريف دالة التنبؤ باستخدام tf.function مع تفعيل experimental_relax_shapes لتقليل إعادة التتبع
+@tf.function(experimental_relax_shapes=True)
+def model_predict(model, input_tensor):
+    return model(input_tensor)
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -151,7 +157,7 @@ def webhook():
 
 def set_telegram_webhook():
     # عدل عنوان الـ Webhook حسب بيئتك
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-domain.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -267,7 +273,7 @@ def calculate_atr_series(df, period=14):
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية.
-    (هذا النموذج التقليدي متاح في حال رغبتك بالمقارنة)
+    (هذا النموذج التقليدي متاح للمقارنة)
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -404,10 +410,11 @@ def generate_signal_lstm(df, symbol):
         confidence = round((1 - loss) * 100, 2)
         logger.info(f"ثقة نموذج LSTM لـ {symbol}: {confidence}%")
 
-        # التنبؤ بالسعر التالي
+        # إعداد آخر نافذة للتنبؤ مع الحفاظ على شكل ثابت
         last_window = scaled_prices[-window_size:]
         last_window = np.reshape(last_window, (1, window_size, 1))
-        predicted_scaled = model.predict(last_window)
+        # استخدام الدالة المعلّمة مسبقاً لتقليل إعادة التتبع
+        predicted_scaled = model_predict(model, last_window)
         predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
         current_price = df['close'].iloc[-1]
 
