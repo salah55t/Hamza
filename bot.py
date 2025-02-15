@@ -370,7 +370,7 @@ def generate_signal_improved(df, symbol):
             logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد أقل من {desired_ratio}")
             return None
 
-        if confidence < 97:
+        if confidence < 90:
             logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من المطلوب")
             return None
 
