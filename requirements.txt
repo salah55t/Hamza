@@ -1,0 +1,10 @@
+pandas
+numpy
+psycopg2-binary
+python-binance
+Flask
+scikit-learn
+python-decouple
+APScheduler
+tensorflow
+requests
