@@ -14,17 +14,6 @@ from sklearn.model_selection import train_test_split
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# مكتبات التعلم العميق لنموذج LSTM
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
-from sklearn.preprocessing import MinMaxScaler
-
-# تعريف دالة التنبؤ باستخدام tf.function مع تفعيل experimental_relax_shapes لتقليل إعادة التتبع
-@tf.function(experimental_relax_shapes=True)
-def model_predict(model, input_tensor):
-    return model(input_tensor)
-
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -48,9 +37,6 @@ logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
 
 # قيمة الصفقة الثابتة للتوصيات
 TRADE_VALUE = 10
-
-# استخدام نموذج LSTM المتقدم بدلاً من النموذج التجميعي التقليدي
-USE_LSTM_MODEL = True
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -107,8 +93,7 @@ ticker_data = {}
 
 def handle_ticker_message(msg):
     """
-    عند استقبال رسالة من WebSocket يتم تحديث البيانات في ticker_data
-    بحيث يكون المفتاح هو رمز الزوج (Symbol).
+    عند استقبال رسالة من WebSocket يتم تحديث البيانات في ticker_data بحيث يكون المفتاح هو رمز الزوج.
     """
     try:
         if isinstance(msg, list):
@@ -156,7 +141,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # عدل عنوان الـ Webhook حسب بيئتك
+    # قم بتعديل عنوان الـ Webhook وفق بيئتك
     webhook_url = "https://your-domain.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
@@ -171,7 +156,7 @@ def set_telegram_webhook():
 
 # ---------------------- وظائف تحليل البيانات والمؤشرات ----------------------
 def get_crypto_symbols():
-    """قراءة الأزواج من الملف وإضافة USDT"""
+    """قراءة الأزواج من الملف وإضافة USDT."""
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
@@ -182,7 +167,7 @@ def get_crypto_symbols():
         return []
 
 def fetch_historical_data(symbol, interval='5m', days=3):
-    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات"""
+    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات."""
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -202,7 +187,7 @@ def fetch_historical_data(symbol, interval='5m', days=3):
         return None
 
 def fetch_recent_volume(symbol):
-    """حساب حجم السيولة في آخر 15 دقيقة"""
+    """حساب حجم السيولة في آخر 15 دقيقة."""
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
@@ -213,14 +198,14 @@ def fetch_recent_volume(symbol):
         return 0
 
 def calculate_volatility(df):
-    """حساب التقلب باستخدام بيانات الإغلاق فقط"""
+    """حساب التقلب باستخدام بيانات الإغلاق فقط."""
     df['returns'] = df['close'].pct_change()
     vol = df['returns'].std() * np.sqrt(24 * 60 / 5) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
 
 def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
-    """حساب مؤشر الاشموكو"""
+    """حساب مؤشر الاشموكو."""
     logger.info("بدء حساب مؤشر الاشموكو")
     period9_high = df['high'].rolling(window=tenkan).max()
     period9_low = df['low'].rolling(window=tenkan).min()
@@ -237,7 +222,7 @@ def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
     return df
 
 def calculate_rsi(df, period=14):
-    """حساب مؤشر RSI"""
+    """حساب مؤشر RSI."""
     logger.info("بدء حساب مؤشر RSI")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -251,7 +236,7 @@ def calculate_rsi(df, period=14):
     return rsi
 
 def calculate_atr(df, period=14):
-    """حساب مؤشر ATR (متوسط المدى الحقيقي)"""
+    """حساب مؤشر ATR (متوسط المدى الحقيقي)."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -261,7 +246,7 @@ def calculate_atr(df, period=14):
     return atr
 
 def calculate_atr_series(df, period=14):
-    """حساب سلسلة ATR لكل صف"""
+    """حساب سلسلة ATR لكل صف."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -269,11 +254,11 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- نماذج التنبؤ وإدارة المخاطر ----------------------
+# ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية.
-    (هذا النموذج التقليدي متاح للمقارنة)
+    يعتمد النموذج على بيانات تاريخية ويستخدم عدة مؤشرات لتحديد الهدف ووقف الخسارة.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -282,7 +267,7 @@ def generate_signal_improved(df, symbol):
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب بعض الميزات الفنية
+        # حساب الميزات الفنية الإضافية
         df['prev_close'] = df['close'].shift(1)
         df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
         df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -328,9 +313,10 @@ def generate_signal_improved(df, symbol):
         current_price = df['close'].iloc[-1]
         current_atr = calculate_atr(df, period=14)
         if current_atr / current_price > 0.03:
-            logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S= {current_atr/current_price:.4f})")
+            logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S = {current_atr/current_price:.4f})")
             return None
 
+        # تحديد الهدف ووقف الخسارة باستخدام مضاعفات ATR
         atr_multiplier_target = 1.5
         atr_multiplier_stop = 1.0
         target = current_price + atr_multiplier_target * current_atr
@@ -366,82 +352,6 @@ def generate_signal_improved(df, symbol):
 
     except Exception as e:
         logger.error(f"خطأ في توليد إشارة محسن للزوج {symbol}: {e}")
-        return None
-
-def generate_signal_lstm(df, symbol):
-    """
-    إنشاء إشارة تداول باستخدام نموذج LSTM المتقدم.
-    يعتمد النموذج على بيانات أسعار الإغلاق للتنبؤ بالسعر التالي،
-    ومن ثم تحديد الهدف ووقف الخسارة بناءً على مؤشر ATR.
-    """
-    logger.info(f"بدء توليد إشارة LSTM للزوج: {symbol}")
-    try:
-        df = df.dropna().reset_index(drop=True)
-        if len(df) < 120:
-            logger.warning(f"بيانات {symbol} غير كافية للنموذج LSTM")
-            return None
-
-        # استخدام عمود 'close' للتنبؤ بالسعر
-        prices = df['close'].values.reshape(-1, 1)
-        scaler = MinMaxScaler(feature_range=(0, 1))
-        scaled_prices = scaler.fit_transform(prices)
-
-        window_size = 20
-        X, y = [], []
-        for i in range(window_size, len(scaled_prices)):
-            X.append(scaled_prices[i - window_size:i, 0])
-            y.append(scaled_prices[i, 0])
-        X, y = np.array(X), np.array(y)
-        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
-
-        split = int(0.8 * len(X))
-        X_train, X_test = X[:split], X[split:]
-        y_train, y_test = y[:split], y[split:]
-
-        # بناء نموذج LSTM
-        model = Sequential()
-        model.add(LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
-        model.add(LSTM(50))
-        model.add(Dense(1))
-        model.compile(optimizer='adam', loss='mean_squared_error')
-
-        model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
-        loss = model.evaluate(X_test, y_test, verbose=0)
-        confidence = round((1 - loss) * 100, 2)
-        logger.info(f"ثقة نموذج LSTM لـ {symbol}: {confidence}%")
-
-        # إعداد آخر نافذة للتنبؤ مع الحفاظ على شكل ثابت
-        last_window = scaled_prices[-window_size:]
-        last_window = np.reshape(last_window, (1, window_size, 1))
-        # استخدام الدالة المعلّمة مسبقاً لتقليل إعادة التتبع
-        predicted_scaled = model_predict(model, last_window)
-        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
-        current_price = df['close'].iloc[-1]
-
-        current_atr = calculate_atr(df, period=14)
-        atr_multiplier_target = 1.5
-        atr_multiplier_stop = 1.0
-        target = current_price + atr_multiplier_target * current_atr
-        stop_loss = current_price - atr_multiplier_stop * current_atr
-
-        if confidence < 97:
-            logger.info(f"تجاهل {symbol} - ثقة نموذج LSTM ({confidence}%) أقل من المطلوب")
-            return None
-
-        signal = {
-            'symbol': symbol,
-            'price': float(format(current_price, '.4f')),
-            'target': float(format(target, '.4f')),
-            'stop_loss': float(format(stop_loss, '.4f')),
-            'confidence': confidence,
-            'atr': round(current_atr, 8),
-            'trade_value': TRADE_VALUE
-        }
-        logger.info(f"تم توليد إشارة LSTM للزوج {symbol}: {signal}")
-        return signal
-
-    except Exception as e:
-        logger.error(f"خطأ في توليد إشارة LSTM للزوج {symbol}: {e}")
         return None
 
 def get_market_dominance():
@@ -720,11 +630,7 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            # اختيار النموذج المناسب بناءً على الإعداد
-            if USE_LSTM_MODEL:
-                signal = generate_signal_lstm(df, symbol)
-            else:
-                signal = generate_signal_improved(df, symbol)
+            signal = generate_signal_improved(df, symbol)
             if not signal:
                 continue
             ichimoku_df = calculate_ichimoku(df.copy())
@@ -768,7 +674,7 @@ def analyze_market():
     logger.info("انتهى فحص جميع الأزواج")
 
 def test_telegram():
-    """دالة لاختبار إرسال رسالة عبر Telegram"""
+    """دالة لاختبار إرسال رسالة عبر Telegram."""
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {'chat_id': chat_id, 'text': 'رسالة اختبار من البوت', 'parse_mode': 'Markdown'}
@@ -778,7 +684,7 @@ def test_telegram():
         logger.error(f"فشل إرسال رسالة الاختبار: {e}")
 
 def run_flask():
-    """تشغيل خادم الويب باستخدام متغير البيئة PORT إن وجد"""
+    """تشغيل خادم الويب باستخدام متغير البيئة PORT إن وجد."""
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
