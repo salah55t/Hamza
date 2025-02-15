@@ -151,7 +151,7 @@ def webhook():
 
 def set_telegram_webhook():
     # عدل عنوان الـ Webhook حسب بيئتك
-    webhook_url = "https://your-domain.com/webhook"
+    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
