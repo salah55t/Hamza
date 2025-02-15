@@ -14,6 +14,11 @@ from sklearn.model_selection import train_test_split
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# مكتبات التعلم العميق لنموذج LSTM
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
+
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +42,9 @@ logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
 
 # قيمة الصفقة الثابتة للتوصيات
 TRADE_VALUE = 10
+
+# استخدام نموذج LSTM المتقدم بدلاً من النموذج التجميعي التقليدي
+USE_LSTM_MODEL = True
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -112,7 +120,6 @@ def handle_ticker_message(msg):
 def run_ticker_socket_manager():
     """
     تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج.
-    هذا يساعد على تقليل عدد طلبات REST وبالتالي تجنب تجاوز وزن الطلب.
     """
     try:
         twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
@@ -143,8 +150,8 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # مثال على عنوان Webhook؛ يجب تعديله وفق بيئتك
-    webhook_url = "https://four-3-4goh.onrender.com/webhook"
+    # عدل عنوان الـ Webhook حسب بيئتك
+    webhook_url = "https://your-domain.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -256,20 +263,11 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
+# ---------------------- نماذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول باستخدام نموذج تجميعي (Ensemble) مع ميزات إضافية:
-    - السعر السابق (prev_close)
-    - المتوسط المتحرك لـ 10 و20 فترة (SMA10 وSMA20)
-    - المتوسط الأسي لـ 10 و20 فترة (EMA10 وEMA20)
-    - مؤشر RSI
-    - مؤشر ATR (كمية التقلب)
-    - تقلب العوائد (volatility)
-    - الزخم (momentum)
-    
-    يتم تدريب النموذج على بيانات تاريخية ومن ثم استخدامه لتقييم ثقة التنبؤ.
-    كما يتم استخدام ATR لتحديد الهدف ووقف الخسارة.
+    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية.
+    (هذا النموذج التقليدي متاح في حال رغبتك بالمقارنة)
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -278,7 +276,7 @@ def generate_signal_improved(df, symbol):
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الإضافية
+        # حساب بعض الميزات الفنية
         df['prev_close'] = df['close'].shift(1)
         df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
         df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -289,7 +287,6 @@ def generate_signal_improved(df, symbol):
         df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
         df['momentum'] = df['close'] - df['close'].shift(10)
         
-        # قائمة الميزات المستخدمة
         features = ['prev_close', 'sma10', 'sma20', 'ema10', 'ema20',
                     'rsi_feature', 'atr_feature', 'volatility', 'momentum']
         df_features = df.dropna().reset_index(drop=True)
@@ -300,10 +297,8 @@ def generate_signal_improved(df, symbol):
         X = df_features[features]
         y = df_features['close']
 
-        # تقسيم البيانات إلى تدريب واختبار
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # استخدام نموذج تجميعي يجمع بين عدة نماذج
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
 
@@ -330,7 +325,6 @@ def generate_signal_improved(df, symbol):
             logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S= {current_atr/current_price:.4f})")
             return None
 
-        # استخدام مضاعفات ATR لتحديد الهدف ووقف الخسارة
         atr_multiplier_target = 1.5
         atr_multiplier_stop = 1.0
         target = current_price + atr_multiplier_target * current_atr
@@ -341,16 +335,15 @@ def generate_signal_improved(df, symbol):
         rounded_target = float(format(target, f'.{decimals}f'))
         rounded_stop_loss = float(format(stop_loss, f'.{decimals}f'))
 
-        # تحسين الشرط عن طريق حساب نسبة المخاطرة للعائد
         reward_percent = (rounded_target - rounded_price) / rounded_price
         risk_percent = (rounded_price - rounded_stop_loss) / rounded_price
-        desired_ratio = 1.5  # الحد الأدنى لنسبة المخاطرة/العائد المطلوبة
+        desired_ratio = 1.5
         if risk_percent == 0 or (reward_percent / risk_percent) < desired_ratio:
-            logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد ({(reward_percent / risk_percent) if risk_percent != 0 else 0:.2f}) أقل من {desired_ratio}")
+            logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد أقل من {desired_ratio}")
             return None
 
         if confidence < 97:
-            logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من 98%")
+            logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من المطلوب")
             return None
 
         signal = {
@@ -367,6 +360,81 @@ def generate_signal_improved(df, symbol):
 
     except Exception as e:
         logger.error(f"خطأ في توليد إشارة محسن للزوج {symbol}: {e}")
+        return None
+
+def generate_signal_lstm(df, symbol):
+    """
+    إنشاء إشارة تداول باستخدام نموذج LSTM المتقدم.
+    يعتمد النموذج على بيانات أسعار الإغلاق للتنبؤ بالسعر التالي،
+    ومن ثم تحديد الهدف ووقف الخسارة بناءً على مؤشر ATR.
+    """
+    logger.info(f"بدء توليد إشارة LSTM للزوج: {symbol}")
+    try:
+        df = df.dropna().reset_index(drop=True)
+        if len(df) < 120:
+            logger.warning(f"بيانات {symbol} غير كافية للنموذج LSTM")
+            return None
+
+        # استخدام عمود 'close' للتنبؤ بالسعر
+        prices = df['close'].values.reshape(-1, 1)
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_prices = scaler.fit_transform(prices)
+
+        window_size = 20
+        X, y = [], []
+        for i in range(window_size, len(scaled_prices)):
+            X.append(scaled_prices[i - window_size:i, 0])
+            y.append(scaled_prices[i, 0])
+        X, y = np.array(X), np.array(y)
+        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+
+        split = int(0.8 * len(X))
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
+
+        # بناء نموذج LSTM
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+        model.add(LSTM(50))
+        model.add(Dense(1))
+        model.compile(optimizer='adam', loss='mean_squared_error')
+
+        model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+        loss = model.evaluate(X_test, y_test, verbose=0)
+        confidence = round((1 - loss) * 100, 2)
+        logger.info(f"ثقة نموذج LSTM لـ {symbol}: {confidence}%")
+
+        # التنبؤ بالسعر التالي
+        last_window = scaled_prices[-window_size:]
+        last_window = np.reshape(last_window, (1, window_size, 1))
+        predicted_scaled = model.predict(last_window)
+        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+        current_price = df['close'].iloc[-1]
+
+        current_atr = calculate_atr(df, period=14)
+        atr_multiplier_target = 1.5
+        atr_multiplier_stop = 1.0
+        target = current_price + atr_multiplier_target * current_atr
+        stop_loss = current_price - atr_multiplier_stop * current_atr
+
+        if confidence < 97:
+            logger.info(f"تجاهل {symbol} - ثقة نموذج LSTM ({confidence}%) أقل من المطلوب")
+            return None
+
+        signal = {
+            'symbol': symbol,
+            'price': float(format(current_price, '.4f')),
+            'target': float(format(target, '.4f')),
+            'stop_loss': float(format(stop_loss, '.4f')),
+            'confidence': confidence,
+            'atr': round(current_atr, 8),
+            'trade_value': TRADE_VALUE
+        }
+        logger.info(f"تم توليد إشارة LSTM للزوج {symbol}: {signal}")
+        return signal
+
+    except Exception as e:
+        logger.error(f"خطأ في توليد إشارة LSTM للزوج {symbol}: {e}")
         return None
 
 def get_market_dominance():
@@ -390,10 +458,9 @@ def get_market_dominance():
         logger.error(f"خطأ في get_market_dominance: {e}")
         return None, None
 
-# ---------------------- فحص اتجاه BTC ----------------------
 cached_btc_trend = None
 cached_btc_trend_timestamp = 0
-BTC_TREND_CACHE_INTERVAL = 3600  # 1 ساعة
+BTC_TREND_CACHE_INTERVAL = 3600  # ساعة
 
 def check_btc_trend():
     logger.info("بدء فحص اتجاه BTCUSDT على فريم 4H")
@@ -422,7 +489,6 @@ def check_btc_trend():
         logger.error(f"خطأ في فحص اتجاه BTC: {e}")
         return False
 
-# ---------------------- إرسال التنبيهات عبر Telegram ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
@@ -536,11 +602,9 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات ----------------------
 def track_signals():
     """
     تتبع الإشارات النشطة وإرسال التنبيهات عند تحقيق الهدف أو تفعيل وقف الخسارة.
-    يتم استخدام بيانات التيكر المحدثة عبر WebSocket لتفادي طلبات REST المتكررة.
     """
     logger.info("بدء خدمة تتبع الإشارات...")
     while True:
@@ -558,7 +622,6 @@ def track_signals():
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss = signal
                 try:
-                    # استخدام بيانات التيكر من WebSocket لتحديد السعر الحالي
                     if symbol in ticker_data:
                         current_price = float(ticker_data[symbol].get('c', 0))
                     else:
@@ -612,15 +675,9 @@ def track_signals():
             conn.rollback()
             time.sleep(60)
 
-# ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
     """
-    فحص جميع الأزواج وفق الشروط المحددة:
-      - توفر بيانات تاريخية كافية
-      - السيولة في آخر 15 دقيقة لا تقل عن الحد المطلوب
-      - شروط نموذج التنبؤ وإشارات مؤشرات فنية مثل Ichimoku وRSI
-      - شرط اتجاه BTC على فريم 4H صعودي/مستقر
-      - عدم وجود توصية سابقة نشطة (أقل من 4)
+    فحص جميع الأزواج وفق الشروط المحددة وإرسال التنبيهات.
     """
     logger.info("بدء فحص الأزواج الآن...")
     check_db_connection()
@@ -656,8 +713,11 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            # استخدام النموذج المحسن لتوليد الإشارة
-            signal = generate_signal_improved(df, symbol)
+            # اختيار النموذج المناسب بناءً على الإعداد
+            if USE_LSTM_MODEL:
+                signal = generate_signal_lstm(df, symbol)
+            else:
+                signal = generate_signal_improved(df, symbol)
             if not signal:
                 continue
             ichimoku_df = calculate_ichimoku(df.copy())
@@ -715,7 +775,6 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
     init_db()
     set_telegram_webhook()
