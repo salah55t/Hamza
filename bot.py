@@ -13,11 +13,13 @@ import json  # لاستخدام reply_markup في تنبيهات Telegram
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from sklearn.metrics import r2_score
+from sklearn.preprocessing import StandardScaler
 
 # ---------------------- إعدادات التداول اليومي ----------------------
-# استخدام بيانات الشموع بمدة 15 دقيقة وجمع بيانات اليوم الواحد
+# استخدام بيانات الشموع بمدة 15 دقيقة وجمع بيانات لمدة 3 أيام للتدريب
 BASE_INTERVAL = '15m'
-HISTORICAL_DAYS = 1
+TRAINING_DAYS = 3   # زيادة فترة البيانات لتحسين التدريب
+SIGNAL_DAYS = 1     # استخدام يوم واحد لإصدار الإشارات
 
 # إعدادات المؤشرات الخاصة بالتداول اليومي
 RSI_PERIOD = 14
@@ -110,9 +112,7 @@ client = Client(api_key, api_secret)
 ticker_data = {}
 
 def handle_ticker_message(msg):
-    """
-    عند استقبال رسالة من WebSocket يتم تحديث البيانات في ticker_data بحيث يكون المفتاح هو رمز الزوج.
-    """
+    """تحديث بيانات التيكر عند استقبال رسالة من WebSocket."""
     try:
         if isinstance(msg, list):
             for m in msg:
@@ -127,9 +127,7 @@ def handle_ticker_message(msg):
         logger.error(f"خطأ في handle_ticker_message: {e}")
 
 def run_ticker_socket_manager():
-    """
-    تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج.
-    """
+    """تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج."""
     try:
         twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
         twm.start()
@@ -159,8 +157,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # قم بتعديل عنوان الـ Webhook وفق بيئتك
-    webhook_url = "https://your-domain.com/webhook"
+    webhook_url = "https://your-domain.com/webhook"  # عدل هذا حسب بيئتك
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -174,7 +171,7 @@ def set_telegram_webhook():
 
 # ---------------------- دوال حساب المؤشرات الفنية ----------------------
 def calculate_macd(df, fast_period=12, slow_period=26, signal_period=9):
-    """حساب مؤشر MACD ومكوناته وإضافتها للـ DataFrame."""
+    """حساب مؤشر MACD ومكوناته."""
     ema_fast = df['close'].ewm(span=fast_period, adjust=False).mean()
     ema_slow = df['close'].ewm(span=slow_period, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -186,7 +183,7 @@ def calculate_macd(df, fast_period=12, slow_period=26, signal_period=9):
     return df
 
 def get_crypto_symbols():
-    """قراءة الأزواج من الملف وإضافة USDT."""
+    """قراءة قائمة العملات من ملف وإضافة 'USDT' لكل عملة."""
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
@@ -196,10 +193,10 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval=BASE_INTERVAL, days=HISTORICAL_DAYS):
-    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات باستخدام الفريم المناسب."""
+def fetch_historical_data(symbol, interval=BASE_INTERVAL, days=TRAINING_DAYS):
+    """جلب البيانات التاريخية باستخدام الفترة المحددة."""
     try:
-        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval}")
+        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval} لمدة {days} يوم")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -228,16 +225,16 @@ def fetch_recent_volume(symbol):
         return 0
 
 def calculate_volatility(df):
-    """حساب التقلب باستخدام بيانات الإغلاق فقط مع تعديل الفريم (15m)."""
+    """حساب التقلب باستخدام بيانات الإغلاق."""
     df['returns'] = df['close'].pct_change()
-    # معامل تحويل يعتمد على شمعات 15 دقيقة (96 شمعه في اليوم)
+    # تحويل يعتمد على 15 دقيقة (حوالي 96 شمعه في اليوم)
     vol = df['returns'].std() * np.sqrt(24 * 60 / 15) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
 
 def calculate_ichimoku(df, tenkan=ICHIMOKU_TENKAN, kijun=ICHIMOKU_KIJUN,
                        senkou_b=ICHIMOKU_SENKOU, displacement=ICHIMOKU_DISPLACEMENT):
-    """حساب مؤشر الاشموكو باستخدام معاملات مخصصة للتداول اليومي."""
+    """حساب مؤشر الاشموكو."""
     logger.info("بدء حساب مؤشر الاشموكو")
     period9_high = df['high'].rolling(window=tenkan).max()
     period9_low = df['low'].rolling(window=tenkan).min()
@@ -254,7 +251,7 @@ def calculate_ichimoku(df, tenkan=ICHIMOKU_TENKAN, kijun=ICHIMOKU_KIJUN,
     return df
 
 def calculate_rsi(df, period=RSI_PERIOD):
-    """حساب مؤشر RSI للفريم اليومي."""
+    """حساب مؤشر RSI."""
     logger.info("بدء حساب مؤشر RSI")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -268,7 +265,7 @@ def calculate_rsi(df, period=RSI_PERIOD):
     return rsi
 
 def calculate_atr(df, period=ATR_PERIOD):
-    """حساب مؤشر ATR (متوسط المدى الحقيقي) للفريم اليومي."""
+    """حساب مؤشر ATR."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -278,7 +275,7 @@ def calculate_atr(df, period=ATR_PERIOD):
     return atr
 
 def calculate_atr_series(df, period=ATR_PERIOD):
-    """حساب سلسلة ATR لكل صف."""
+    """حساب سلسلة ATR."""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -286,11 +283,11 @@ def calculate_atr_series(df, period=ATR_PERIOD):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
+# ---------------------- تحسين نموذج التنبؤ ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية،
-    باستخدام إعدادات مؤشرات مُحسّنة للتداول اليومي.
+    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية للتداول اليومي.
+    نستخدم 3 أيام من البيانات للتدريب ونقسم البيانات بالتسلسل الزمني.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -299,7 +296,7 @@ def generate_signal_improved(df, symbol):
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الفنية الأساسية
+        # حساب الميزات الفنية
         df['prev_close'] = df['close'].shift(1)
         df['sma_short'] = df['close'].rolling(window=SMA_PERIOD_SHORT).mean().shift(1)
         df['sma_long'] = df['close'].rolling(window=SMA_PERIOD_LONG).mean().shift(1)
@@ -309,7 +306,7 @@ def generate_signal_improved(df, symbol):
         df['atr_feature'] = calculate_atr_series(df, period=ATR_PERIOD).shift(1)
         df['volatility'] = df['close'].pct_change().rolling(window=SMA_PERIOD_SHORT).std().shift(1)
         df['momentum'] = df['close'] - df['close'].shift(MOMENTUM_PERIOD)
-        # حساب MACD وإضافته كميزات
+        # حساب MACD وإضافته
         df = calculate_macd(df)
         features = ['prev_close', 'sma_short', 'sma_long', 'ema_short', 'ema_long',
                     'rsi_feature', 'atr_feature', 'volatility', 'momentum',
@@ -322,10 +319,15 @@ def generate_signal_improved(df, symbol):
         X = df_features[features]
         y = df_features['close']
 
-        # تقسيم البيانات بطريقة زمنية (بدون خلط)
+        # تقسيم البيانات بالتسلسل الزمني (80% للتدريب)
         split_idx = int(0.8 * len(X))
         X_train, X_test = X[:split_idx], X[split_idx:]
         y_train, y_test = y[:split_idx], y[split_idx:]
+
+        # يمكن استخدام التطبيع لتحسين النموذج
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
 
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
@@ -342,17 +344,16 @@ def generate_signal_improved(df, symbol):
             ('ridge', model4)
         ])
 
-        voting_reg.fit(X_train, y_train)
-        y_pred = voting_reg.predict(X_test)
+        voting_reg.fit(X_train_scaled, y_train)
+        y_pred = voting_reg.predict(X_test_scaled)
         score = r2_score(y_test, y_pred)
         confidence = round(score * 100, 2)
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
         current_price = df['close'].iloc[-1]
         current_atr = calculate_atr(df, period=ATR_PERIOD)
-        # تمت إزالة شرط تجاوز الإشارة في حال كان التقلب مرتفعًا
 
-        # تحديد الهدف ووقف الخسارة باستخدام مضاعفات ATR
+        # تحديد الهدف ووقف الخسارة
         atr_multiplier_target = 1.5
         atr_multiplier_stop = 1.0
         target = current_price + atr_multiplier_target * current_atr
@@ -370,7 +371,7 @@ def generate_signal_improved(df, symbol):
             logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد أقل من {desired_ratio}")
             return None
 
-        if confidence < 90:
+        if confidence < 80:
             logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من المطلوب")
             return None
 
@@ -391,9 +392,7 @@ def generate_signal_improved(df, symbol):
         return None
 
 def get_market_dominance():
-    """
-    الحصول على نسب السيطرة على السوق للبيتكوين والإيثيريوم من CoinGecko.
-    """
+    """الحصول على نسب السيطرة على السوق من CoinGecko."""
     try:
         url = "https://api.coingecko.com/api/v3/global"
         response = requests.get(url, timeout=10)
