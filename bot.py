@@ -266,17 +266,17 @@ def generate_signal_improved(df, symbol):
     إنشاء إشارة تداول محسنة لتوصيات التداول اليومي باستخدام نموذج تجميعي (Ensemble)
     مع ميزات إضافية:
       - السعر السابق (prev_close)
-      - المتوسط المتحرك لـ 10 و20 فترة (SMA10 وSMA20)
-      - المتوسط المتحرك لـ 50 فترة (SMA50)
-      - المتوسط الأسي لـ 10 و20 و50 فترة (EMA10 وEMA20 وEMA50)
+      - المتوسط المتحرك لـ 10 و20 و50 فترة (SMA10, SMA20, SMA50)
+      - المتوسط الأسي لـ 10 و20 و50 فترة (EMA10, EMA20, EMA50)
       - مؤشر RSI
-      - مؤشر ATR وسلسلة ATR
+      - ATR وسلسلة ATR
       - تقلب العوائد (volatility)
       - الزخم (momentum)
     
-    يتم تطبيق مُقيّم معياري (StandardScaler) على الميزات، ويُستخدم تجميع من النماذج:
-      - RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, Ridge
-    كما يتم تحديد الهدف ووقف الخسارة باستخدام مضاعفات ATR.
+    يتم تطبيق StandardScaler على الميزات، ويستخدم التجميع الآتي:
+      - RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor,
+        Ridge, وXGBRegressor (من مكتبة xgboost)
+    يُستخدم ATR لتحديد الهدف ووقف الخسارة دون شرط نسبة المخاطرة/العائد.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -313,25 +313,28 @@ def generate_signal_improved(df, symbol):
         # تقسيم البيانات إلى تدريب واختبار
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-        # تطبيق القياس المعياري على الميزات لتحسين أداء النماذج
+        # تطبيق القياس المعياري على الميزات
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # استخدام نموذج تجميعي يجمع بين عدة نماذج مع زيادة عدد التكرارات
+        # استخدام نموذج تجميعي مع إضافة XGBoost لتحسين الأداء
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
+        from xgboost import XGBRegressor
 
         model1 = RandomForestRegressor(n_estimators=200, random_state=42)
         model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
         model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
         model4 = Ridge()
+        model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
 
         voting_reg = VotingRegressor([
             ('rf', model1),
             ('gbr', model2),
             ('etr', model3),
-            ('ridge', model4)
+            ('ridge', model4),
+            ('xgb', model5)
         ])
 
         voting_reg.fit(X_train_scaled, y_train)
@@ -339,18 +342,13 @@ def generate_signal_improved(df, symbol):
         confidence = round(score * 100, 2)
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
-        # إذا كانت ثقة النموذج أقل من 98%، يتم تجاهل الإشارة
-        if confidence < 98:
-            logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من 98%")
-            return None
-
         current_price = df['close'].iloc[-1]
         current_atr = calculate_atr(df, period=14)
         if current_atr / current_price > 0.03:
             logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S= {current_atr/current_price:.4f})")
             return None
 
-        # استخدام مضاعفات ATR لتحديد الهدف ووقف الخسارة
+        # استخدام مضاعفات ATR لتحديد الهدف ووقف الخسارة (دون شرط نسبة المخاطرة/العائد)
         atr_multiplier_target = 1.5
         atr_multiplier_stop = 1.0
         target = current_price + atr_multiplier_target * current_atr
@@ -360,14 +358,6 @@ def generate_signal_improved(df, symbol):
         rounded_price = float(format(current_price, f'.{decimals}f'))
         rounded_target = float(format(target, f'.{decimals}f'))
         rounded_stop_loss = float(format(stop_loss, f'.{decimals}f'))
-
-        # تحسين الشرط عن طريق حساب نسبة المخاطرة للعائد
-        reward_percent = (rounded_target - rounded_price) / rounded_price
-        risk_percent = (rounded_price - rounded_stop_loss) / rounded_price
-        desired_ratio = 1.5  # الحد الأدنى لنسبة المخاطرة/العائد المطلوبة
-        if risk_percent == 0 or (reward_percent / risk_percent) < desired_ratio:
-            logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد ({(reward_percent / risk_percent) if risk_percent != 0 else 0:.2f}) أقل من {desired_ratio}")
-            return None
 
         signal = {
             'symbol': symbol,
@@ -664,7 +654,7 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)  # يتم جلب بيانات آخر 3 أيام
+            df = fetch_historical_data(symbol)  # بيانات آخر 3 أيام
             if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
