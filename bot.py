@@ -145,7 +145,7 @@ def webhook():
 
 def set_telegram_webhook():
     # مثال على عنوان Webhook؛ يجب تعديله وفق بيئتك
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -260,6 +260,56 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
+# ---------------------- دوال لحساب نقاط الارتداد (Pivot Points) ----------------------
+def get_pivot_points(df, left=3, right=3):
+    """
+    تحديد نقاط الارتداد (pivot points) للأسعار.
+    يُعتبر السعر نقطة ارتداد منخفضة (pivot low) إذا كان أقل من أسعار (left) الشموع السابقة
+    و( right) الشموع التالية، والعكس بالنسبة لنقاط الارتداد العالية (pivot high).
+    """
+    pivot_lows = []
+    pivot_highs = []
+    for i in range(left, len(df) - right):
+        low = df['low'].iloc[i]
+        if all(low < df['low'].iloc[i - j] for j in range(1, left + 1)) and \
+           all(low < df['low'].iloc[i + j] for j in range(1, right + 1)):
+            pivot_lows.append((i, low))
+        high = df['high'].iloc[i]
+        if all(high > df['high'].iloc[i - j] for j in range(1, left + 1)) and \
+           all(high > df['high'].iloc[i + j] for j in range(1, right + 1)):
+            pivot_highs.append((i, high))
+    return pivot_lows, pivot_highs
+
+def cluster_levels(pivots, tolerance=0.002):
+    """
+    تجميع النقاط التي تقع ضمن هامش (tolerance) معين.
+    يُرجع قائمة من التجمعات حيث يحتوي كل عنصر على [المستوى المتوسط، عدد الارتدادات].
+    """
+    clusters = []
+    for idx, price in pivots:
+        placed = False
+        for cluster in clusters:
+            if abs(cluster[0] - price) / cluster[0] < tolerance:
+                # تحديث المتوسط وعدد الارتدادات
+                cluster[0] = (cluster[0] * cluster[1] + price) / (cluster[1] + 1)
+                cluster[1] += 1
+                placed = True
+                break
+        if not placed:
+            clusters.append([price, 1])
+    return clusters
+
+def get_level_from_clusters(clusters, min_bounce=3):
+    """
+    اختيار المستوى من التجمعات إذا كان عدد الارتدادات (bounce count) أكبر من أو يساوي min_bounce.
+    """
+    valid = [c for c in clusters if c[1] >= min_bounce]
+    if valid:
+        best = max(valid, key=lambda x: x[1])
+        return best[0]
+    else:
+        return None
+
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
@@ -276,7 +326,12 @@ def generate_signal_improved(df, symbol):
     يتم تطبيق StandardScaler على الميزات، ويستخدم التجميع الآتي:
       - RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor,
         Ridge, وXGBRegressor (من مكتبة xgboost)
-    يُستخدم ATR لتحديد الهدف ووقف الخسارة دون شرط نسبة المخاطرة/العائد.
+    
+    بعد تقييم الميزات والنموذج يتم حساب نقاط الارتداد (Pivot Points) لحساب
+    مستويات الدعم والمقاومة. يُعتبر المستوى مقاومة إذا ارتد السعر منه (pivot high)
+    أكثر من مرتين، والدعم إذا ارتد السعر منه (pivot low) أكثر من مرتين.
+    إذا كانت مستويات الدعم والمقاومة محددة وكان السعر الحالي يقع بينهما،
+    يتم تعيين وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -343,16 +398,26 @@ def generate_signal_improved(df, symbol):
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
         current_price = df['close'].iloc[-1]
-        current_atr = calculate_atr(df, period=14)
-        if current_atr / current_price > 0.03:
-            logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S= {current_atr/current_price:.4f})")
+
+        # حساب مستويات الدعم والمقاومة باستخدام نقاط الارتداد
+        pivot_lows, pivot_highs = get_pivot_points(df, left=3, right=3)
+        low_clusters = cluster_levels(pivot_lows, tolerance=0.002)
+        high_clusters = cluster_levels(pivot_highs, tolerance=0.002)
+        support = get_level_from_clusters(low_clusters, min_bounce=3)
+        resistance = get_level_from_clusters(high_clusters, min_bounce=3)
+
+        if support is None or resistance is None:
+            logger.info(f"تجاهل {symbol} - لم يتم تحديد مستويات دعم/مقاومة صالحة")
             return None
 
-        # استخدام مضاعفات ATR لتحديد الهدف ووقف الخسارة (دون شرط نسبة المخاطرة/العائد)
-        atr_multiplier_target = 1.5
-        atr_multiplier_stop = 1.0
-        target = current_price + atr_multiplier_target * current_atr
-        stop_loss = current_price - atr_multiplier_stop * current_atr
+        # التأكد من أن السعر الحالي يقع بين الدعم والمقاومة
+        if current_price <= support or current_price >= resistance:
+            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) ليس بين مستويات الدعم ({support}) والمقاومة ({resistance})")
+            return None
+
+        # تعيين وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة
+        stop_loss = support
+        target = resistance
 
         decimals = 8 if current_price < 1 else 4
         rounded_price = float(format(current_price, f'.{decimals}f'))
@@ -365,7 +430,6 @@ def generate_signal_improved(df, symbol):
             'target': rounded_target,
             'stop_loss': rounded_stop_loss,
             'confidence': confidence,
-            'atr': round(current_atr, 8),
             'trade_value': TRADE_VALUE
         }
         logger.info(f"تم توليد الإشارة المحسنة للزوج {symbol}: {signal}")
@@ -440,7 +504,6 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
             f"📊 ثقة النموذج: {signal['confidence']}%\n"
-            f"📏 ATR: {signal['atr']}\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
