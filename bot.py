@@ -134,7 +134,7 @@ def webhook():
 
 def set_telegram_webhook():
     # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -234,15 +234,15 @@ def calculate_atr_series(df, period=14):
     return atr_series
 
 # ---------------------- دوال حساب مستويات فيبوناتشي ----------------------
-# لحساب المقاومة: المستوى 0 هو أدنى سعر في اليوم، والمستوى 1 هو أعلى سعر.
-# ثم المقاومة = lowest + 0.618 * (highest - lowest)
-# لحساب الدعم: المستوى 0 هو أعلى سعر في اليوم، والمستوى 1 هو أدنى سعر.
-# ثم الدعم = highest - 0.618 * (highest - lowest)
+# لتحديد المقاومة: نعتبر أدنى سعر يوميًا كالمستوى 0 وأعلى سعر يوميًا كالمستوى 1،
+# ثم المقاومة = lowest + 0.786 * (highest - lowest)
+# لتحديد الدعم: نعتبر أعلى سعر يوميًا كالمستوى 0 وأدنى سعر يوميًا كالمستوى 1،
+# ثم الدعم = highest - 0.786 * (highest - lowest)
 def calculate_fibonacci_levels(df_day):
     highest = df_day['high'].max()
     lowest = df_day['low'].min()
-    resistance = lowest + 0.618 * (highest - lowest)
-    support = highest - 0.618 * (highest - lowest)
+    resistance = lowest + 0.786 * (highest - lowest)
+    support = highest - 0.786 * (highest - lowest)
     return support, resistance
 
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
@@ -250,8 +250,8 @@ def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
     وحساب مستويات الدعم والمقاومة باستخدام مستويات فيبوناتشي بحيث:
-      - لتحديد المقاومة: نستخدم أدنى سعر ويومياً كـ 0 وأعلى سعر كـ 1، والمستوى 0.618 هو المقاومة.
-      - لتحديد الدعم: نستخدم أعلى سعر ويومياً كـ 0 وأدنى سعر كـ 1، والمستوى 0.618 هو الدعم.
+      - المقاومة تُحسب باستخدام أدنى سعر يومي (مستوى 0) وأعلى سعر يومي (مستوى 1)، والمستوى 0.786 هو المقاومة.
+      - الدعم يُحسب باستخدام أعلى سعر يومي (مستوى 0) وأدنى سعر يومي (مستوى 1)، والمستوى 0.786 هو الدعم.
     يجب أن يكون السعر الحالي ضمن النطاق بين الدعم والمقاومة.
     إذا تحقق ذلك، يتم تعيين وقف الخسارة عند مستوى الدعم.
     """
@@ -317,9 +317,9 @@ def generate_signal_improved(df, symbol):
         current_price = df['close'].iloc[-1]
 
         # حساب مستويات فيبوناتشي باستخدام بيانات يوم واحد على فريم 15 دقيقة
-        # نستخدم آخر 288 شمعة (إذا كانت متوفرة)
-        if len(df) >= 288:
-            day_df = df.tail(288)
+        # نستخدم آخر 576 شمعة (إذا كانت متوفرة)
+        if len(df) >= 576:
+            day_df = df.tail(576)
         else:
             day_df = df
         support, resistance = calculate_fibonacci_levels(day_df)
