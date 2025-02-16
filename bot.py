@@ -11,6 +11,7 @@ import logging
 import requests
 import json  # لاستخدام reply_markup في تنبيهات Telegram
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -169,7 +170,10 @@ def get_crypto_symbols():
         return []
 
 def fetch_historical_data(symbol, interval='5m', days=3):
-    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات"""
+    """
+    جلب البيانات التاريخية المطلوبة (لآخر 3 أيام) للفاصل الزمني المحدد.
+    يُستخدم هذا لتحليل المؤشرات وتوليد الإشارات.
+    """
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -259,17 +263,20 @@ def calculate_atr_series(df, period=14):
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول باستخدام نموذج تجميعي (Ensemble) مع ميزات إضافية:
-    - السعر السابق (prev_close)
-    - المتوسط المتحرك لـ 10 و20 فترة (SMA10 وSMA20)
-    - المتوسط الأسي لـ 10 و20 فترة (EMA10 وEMA20)
-    - مؤشر RSI
-    - مؤشر ATR (كمية التقلب)
-    - تقلب العوائد (volatility)
-    - الزخم (momentum)
+    إنشاء إشارة تداول محسنة لتوصيات التداول اليومي باستخدام نموذج تجميعي (Ensemble)
+    مع ميزات إضافية:
+      - السعر السابق (prev_close)
+      - المتوسط المتحرك لـ 10 و20 فترة (SMA10 وSMA20)
+      - المتوسط المتحرك لـ 50 فترة (SMA50)
+      - المتوسط الأسي لـ 10 و20 و50 فترة (EMA10 وEMA20 وEMA50)
+      - مؤشر RSI
+      - مؤشر ATR وسلسلة ATR
+      - تقلب العوائد (volatility)
+      - الزخم (momentum)
     
-    يتم تدريب النموذج على بيانات تاريخية ومن ثم استخدامه لتقييم ثقة التنبؤ.
-    كما يتم استخدام ATR لتحديد الهدف ووقف الخسارة.
+    يتم تطبيق مُقيّم معياري (StandardScaler) على الميزات، ويُستخدم تجميع من النماذج:
+      - RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, Ridge
+    كما يتم تحديد الهدف ووقف الخسارة باستخدام مضاعفات ATR.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -282,16 +289,19 @@ def generate_signal_improved(df, symbol):
         df['prev_close'] = df['close'].shift(1)
         df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
         df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
+        df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
         df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
         df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
+        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
         df['rsi_feature'] = calculate_rsi(df).shift(1)
         df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
         df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
         df['momentum'] = df['close'] - df['close'].shift(10)
-        
+
         # قائمة الميزات المستخدمة
-        features = ['prev_close', 'sma10', 'sma20', 'ema10', 'ema20',
-                    'rsi_feature', 'atr_feature', 'volatility', 'momentum']
+        features = ['prev_close', 'sma10', 'sma20', 'sma50',
+                    'ema10', 'ema20', 'ema50', 'rsi_feature',
+                    'atr_feature', 'volatility', 'momentum']
         df_features = df.dropna().reset_index(drop=True)
         if len(df_features) < 50:
             logger.warning(f"بيانات الميزات لـ {symbol} غير كافية")
@@ -301,15 +311,20 @@ def generate_signal_improved(df, symbol):
         y = df_features['close']
 
         # تقسيم البيانات إلى تدريب واختبار
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
 
-        # استخدام نموذج تجميعي يجمع بين عدة نماذج
+        # تطبيق القياس المعياري على الميزات لتحسين أداء النماذج
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train)
+        X_test_scaled = scaler.transform(X_test)
+
+        # استخدام نموذج تجميعي يجمع بين عدة نماذج مع زيادة عدد التكرارات
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
 
-        model1 = RandomForestRegressor(n_estimators=100, random_state=42)
-        model2 = GradientBoostingRegressor(n_estimators=100, random_state=42)
-        model3 = ExtraTreesRegressor(n_estimators=100, random_state=42)
+        model1 = RandomForestRegressor(n_estimators=200, random_state=42)
+        model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
+        model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
         model4 = Ridge()
 
         voting_reg = VotingRegressor([
@@ -319,10 +334,15 @@ def generate_signal_improved(df, symbol):
             ('ridge', model4)
         ])
 
-        voting_reg.fit(X_train, y_train)
-        score = voting_reg.score(X_test, y_test)
+        voting_reg.fit(X_train_scaled, y_train)
+        score = voting_reg.score(X_test_scaled, y_test)
         confidence = round(score * 100, 2)
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
+
+        # إذا كانت ثقة النموذج أقل من 98%، يتم تجاهل الإشارة
+        if confidence < 98:
+            logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من 98%")
+            return None
 
         current_price = df['close'].iloc[-1]
         current_atr = calculate_atr(df, period=14)
@@ -347,10 +367,6 @@ def generate_signal_improved(df, symbol):
         desired_ratio = 1.5  # الحد الأدنى لنسبة المخاطرة/العائد المطلوبة
         if risk_percent == 0 or (reward_percent / risk_percent) < desired_ratio:
             logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد ({(reward_percent / risk_percent) if risk_percent != 0 else 0:.2f}) أقل من {desired_ratio}")
-            return None
-
-        if confidence < 97:
-            logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من 98%")
             return None
 
         signal = {
@@ -616,9 +632,9 @@ def track_signals():
 def analyze_market():
     """
     فحص جميع الأزواج وفق الشروط المحددة:
-      - توفر بيانات تاريخية كافية
+      - توفر بيانات تاريخية كافية (3 أيام من البيانات)
       - السيولة في آخر 15 دقيقة لا تقل عن الحد المطلوب
-      - شروط نموذج التنبؤ وإشارات مؤشرات فنية مثل Ichimoku وRSI
+      - شروط نموذج التنبؤ وإشارات المؤشرات الفنية (Ichimoku, RSI، الخ)
       - شرط اتجاه BTC على فريم 4H صعودي/مستقر
       - عدم وجود توصية سابقة نشطة (أقل من 4)
     """
@@ -648,7 +664,7 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)
+            df = fetch_historical_data(symbol)  # يتم جلب بيانات آخر 3 أيام
             if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
@@ -734,4 +750,4 @@ if __name__ == '__main__':
         while True:
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
-        scheduler.shutdown() cv
+        scheduler.shutdown()
