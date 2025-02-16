@@ -134,7 +134,7 @@ def webhook():
 
 def set_telegram_webhook():
     # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://your-app.onrender.com/webhook"
+    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -233,27 +233,26 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- دوال حساب مستويات فيبوناتشي ----------------------
-# لتحديد المقاومة: نعتبر أدنى سعر يوميًا كالمستوى 0 وأعلى سعر يوميًا كالمستوى 1،
-# ثم المقاومة = lowest + 0.786 * (highest - lowest)
-# لتحديد الدعم: نعتبر أعلى سعر يوميًا كالمستوى 0 وأدنى سعر يوميًا كالمستوى 1،
-# ثم الدعم = highest - 0.786 * (highest - lowest)
-def calculate_fibonacci_levels(df_day):
-    highest = df_day['high'].max()
-    lowest = df_day['low'].min()
-    resistance = lowest + 0.786 * (highest - lowest)
-    support = highest - 0.786 * (highest - lowest)
-    return support, resistance
+# ---------------------- دوال حساب القناة السعرية ----------------------
+def calculate_price_channel(df_day):
+    """
+    حساب القناة السعرية باستخدام بيانات اليوم:
+      - الحد الأدنى (الدعم) هو أدنى سعر خلال الفترة.
+      - الحد الأعلى (المقاومة) هو أعلى سعر خلال الفترة.
+    """
+    lower_channel = df_day['low'].min()
+    upper_channel = df_day['high'].max()
+    return lower_channel, upper_channel
 
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
-    وحساب مستويات الدعم والمقاومة باستخدام مستويات فيبوناتشي بحيث:
-      - المقاومة تُحسب باستخدام أدنى سعر يومي (مستوى 0) وأعلى سعر يومي (مستوى 1)، والمستوى 0.786 هو المقاومة.
-      - الدعم يُحسب باستخدام أعلى سعر يومي (مستوى 0) وأدنى سعر يومي (مستوى 1)، والمستوى 0.786 هو الدعم.
+    والاعتماد على القناة السعرية (Donchian Channel) لتحديد الهدف ووقف الخسارة.
+    يتم حساب القناة باستخدام بيانات يوم واحد على فريم 15 دقيقة (آخر 96 شمعة).
     يجب أن يكون السعر الحالي ضمن النطاق بين الدعم والمقاومة.
-    إذا تحقق ذلك، يتم تعيين وقف الخسارة عند مستوى الدعم.
+    - وقف الخسارة يُعيّن عند الحد الأدنى للقناة (الدعم).
+    - الهدف يُعيّن عند الحد الأعلى للقناة (المقاومة).
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -316,21 +315,22 @@ def generate_signal_improved(df, symbol):
 
         current_price = df['close'].iloc[-1]
 
-        # حساب مستويات فيبوناتشي باستخدام بيانات يوم واحد على فريم 15 دقيقة
-        # نستخدم آخر 576 شمعة (إذا كانت متوفرة)
-        if len(df) >= 576:
-            day_df = df.tail(576)
+        # حساب القناة السعرية باستخدام بيانات يوم واحد على فريم 15 دقيقة
+        # نستخدم آخر 96 شمعة (يوم كامل إذا كانت الشموع كل 15 دقيقة)
+        if len(df) >= 96:
+            day_df = df.tail(96)
         else:
             day_df = df
-        support, resistance = calculate_fibonacci_levels(day_df)
+        lower_channel, upper_channel = calculate_price_channel(day_df)
 
-        # التأكد من أن المقاومة أعلى من السعر الحالي والدعم أقل من السعر الحالي
-        if not (support < current_price < resistance):
-            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) يجب أن يكون ضمن النطاق بين الدعم ({support}) والمقاومة ({resistance})")
+        # التأكد من أن السعر الحالي يقع ضمن القناة السعرية
+        if not (lower_channel < current_price < upper_channel):
+            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) خارج نطاق القناة السعرية (من {lower_channel} إلى {upper_channel})")
             return None
 
-        stop_loss = support
-        target = resistance
+        # تعيين وقف الخسارة عند الحد الأدنى للقناة (الدعم) والهدف عند الحد الأعلى للقناة (المقاومة)
+        stop_loss = lower_channel
+        target = upper_channel
 
         decimals = 8 if current_price < 1 else 4
         rounded_price = float(format(current_price, f'.{decimals}f'))
