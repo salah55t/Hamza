@@ -19,10 +19,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('crypto_bot.log'),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler('crypto_bot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -93,10 +90,6 @@ client = Client(api_key, api_secret)
 ticker_data = {}
 
 def handle_ticker_message(msg):
-    """
-    عند استقبال رسالة من WebSocket يتم تحديث البيانات في ticker_data
-    بحيث يكون المفتاح هو رمز الزوج (Symbol).
-    """
     try:
         if isinstance(msg, list):
             for m in msg:
@@ -111,10 +104,6 @@ def handle_ticker_message(msg):
         logger.error(f"خطأ في handle_ticker_message: {e}")
 
 def run_ticker_socket_manager():
-    """
-    تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج.
-    هذا يساعد على تقليل عدد طلبات REST وبالتالي تجنب تجاوز وزن الطلب.
-    """
     try:
         twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
         twm.start()
@@ -144,7 +133,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # مثال على عنوان Webhook؛ يجب تعديله وفق بيئتك
+    # يجب تعديل الرابط أدناه ليناسب عنوان التطبيق المنشور (مثلاً على Render)
     webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
@@ -159,7 +148,6 @@ def set_telegram_webhook():
 
 # ---------------------- وظائف تحليل البيانات والمؤشرات ----------------------
 def get_crypto_symbols():
-    """قراءة الأزواج من الملف وإضافة USDT"""
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
@@ -169,19 +157,16 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='5m', days=3):
+def fetch_historical_data(symbol, interval='5m', days=2):
     """
-    جلب البيانات التاريخية المطلوبة (لآخر 3 أيام) للفاصل الزمني المحدد.
-    يُستخدم هذا لتحليل المؤشرات وتوليد الإشارات.
+    جلب البيانات التاريخية لمدة يومين على فريم 5 دقائق.
     """
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
-        df = pd.DataFrame(klines, columns=[
-            'timestamp', 'open', 'high', 'low', 'close', 'volume',
-            'close_time', 'quote_volume', 'trades',
-            'taker_buy_base', 'taker_buy_quote', 'ignore'
-        ])
+        df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume',
+                                             'close_time', 'quote_volume', 'trades',
+                                             'taker_buy_base', 'taker_buy_quote', 'ignore'])
         df['open'] = df['open'].astype(float)
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
@@ -193,7 +178,6 @@ def fetch_historical_data(symbol, interval='5m', days=3):
         return None
 
 def fetch_recent_volume(symbol):
-    """حساب حجم السيولة في آخر 15 دقيقة"""
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
@@ -204,31 +188,22 @@ def fetch_recent_volume(symbol):
         return 0
 
 def calculate_volatility(df):
-    """حساب التقلب باستخدام بيانات الإغلاق فقط"""
     df['returns'] = df['close'].pct_change()
     vol = df['returns'].std() * np.sqrt(24 * 60 / 5) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
 
 def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
-    """حساب مؤشر الاشموكو"""
     logger.info("بدء حساب مؤشر الاشموكو")
-    period9_high = df['high'].rolling(window=tenkan).max()
-    period9_low = df['low'].rolling(window=tenkan).min()
-    df['tenkan_sen'] = (period9_high + period9_low) / 2
-    period26_high = df['high'].rolling(window=kijun).max()
-    period26_low = df['low'].rolling(window=kijun).min()
-    df['kijun_sen'] = (period26_high + period26_low) / 2
+    df['tenkan_sen'] = (df['high'].rolling(window=tenkan).max() + df['low'].rolling(window=tenkan).min()) / 2
+    df['kijun_sen'] = (df['high'].rolling(window=kijun).max() + df['low'].rolling(window=kijun).min()) / 2
     df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(displacement)
-    period52_high = df['high'].rolling(window=senkou_b).max()
-    period52_low = df['low'].rolling(window=senkou_b).min()
-    df['senkou_span_b'] = ((period52_high + period52_low) / 2).shift(displacement)
+    df['senkou_span_b'] = ((df['high'].rolling(window=senkou_b).max() + df['low'].rolling(window=senkou_b).min()) / 2).shift(displacement)
     df['chikou_span'] = df['close'].shift(-displacement)
     logger.info("انتهى حساب مؤشر الاشموكو")
     return df
 
 def calculate_rsi(df, period=14):
-    """حساب مؤشر RSI"""
     logger.info("بدء حساب مؤشر RSI")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -242,7 +217,6 @@ def calculate_rsi(df, period=14):
     return rsi
 
 def calculate_atr(df, period=14):
-    """حساب مؤشر ATR (متوسط المدى الحقيقي)"""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -252,7 +226,6 @@ def calculate_atr(df, period=14):
     return atr
 
 def calculate_atr_series(df, period=14):
-    """حساب سلسلة ATR لكل صف"""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -260,13 +233,8 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- دوال لحساب نقاط الارتداد (Pivot Points) ----------------------
+# دوال حساب نقاط الارتداد (Pivot Points)
 def get_pivot_points(df, left=3, right=3):
-    """
-    تحديد نقاط الارتداد (pivot points) للأسعار.
-    يُعتبر السعر نقطة ارتداد منخفضة (pivot low) إذا كان أقل من أسعار (left) الشموع السابقة
-    و( right) الشموع التالية، والعكس بالنسبة لنقاط الارتداد العالية (pivot high).
-    """
     pivot_lows = []
     pivot_highs = []
     for i in range(left, len(df) - right):
@@ -281,10 +249,6 @@ def get_pivot_points(df, left=3, right=3):
     return pivot_lows, pivot_highs
 
 def cluster_levels(pivots, tolerance=0.002):
-    """
-    تجميع النقاط التي تقع ضمن هامش (tolerance) معين.
-    يُرجع قائمة من التجمعات حيث يحتوي كل عنصر على [المستوى المتوسط، عدد الارتدادات].
-    """
     clusters = []
     for idx, price in pivots:
         placed = False
@@ -299,13 +263,22 @@ def cluster_levels(pivots, tolerance=0.002):
             clusters.append([price, 1])
     return clusters
 
-def get_level_from_clusters(clusters, min_bounce=3):
-    """
-    اختيار المستوى من التجمعات إذا كان عدد الارتدادات (bounce count) أكبر من أو يساوي min_bounce.
-    """
-    valid = [c for c in clusters if c[1] >= min_bounce]
+def get_resistance_from_clusters(clusters, current_price, min_bounce=5):
+    # اختيار المستوى الذي يقع فوق السعر الحالي ويملك عدد ارتدادات ≥ 5
+    valid = [c for c in clusters if c[1] >= min_bounce and c[0] > current_price]
     if valid:
-        best = max(valid, key=lambda x: x[1])
+        # اختيار المقاومة الأقرب (أقل مستوى)
+        best = min(valid, key=lambda x: x[0])
+        return best[0]
+    else:
+        return None
+
+def get_support_from_clusters(clusters, current_price, min_bounce=5):
+    # اختيار المستوى الذي يقع تحت السعر الحالي ويملك عدد ارتدادات ≥ 5
+    valid = [c for c in clusters if c[1] >= min_bounce and c[0] < current_price]
+    if valid:
+        # اختيار الدعم الأقرب (أعلى مستوى)
+        best = max(valid, key=lambda x: x[0])
         return best[0]
     else:
         return None
@@ -313,25 +286,11 @@ def get_level_from_clusters(clusters, min_bounce=3):
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول محسنة لتوصيات التداول اليومي باستخدام نموذج تجميعي (Ensemble)
-    مع ميزات إضافية:
-      - السعر السابق (prev_close)
-      - المتوسط المتحرك لـ 10 و20 و50 فترة (SMA10, SMA20, SMA50)
-      - المتوسط الأسي لـ 10 و20 و50 فترة (EMA10, EMA20, EMA50)
-      - مؤشر RSI
-      - ATR وسلسلة ATR
-      - تقلب العوائد (volatility)
-      - الزخم (momentum)
-    
-    يتم تطبيق StandardScaler على الميزات، ويستخدم التجميع الآتي:
-      - RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor,
-        Ridge, وXGBRegressor (من مكتبة xgboost)
-    
-    بعد تقييم الميزات والنموذج يتم حساب نقاط الارتداد (Pivot Points) لحساب
-    مستويات الدعم والمقاومة. يُعتبر المستوى مقاومة إذا ارتد السعر منه (pivot high)
-    أكثر من مرتين، والدعم إذا ارتد السعر منه (pivot low) أكثر من مرتين.
-    إذا كانت مستويات الدعم والمقاومة محددة وكان السعر الحالي يقع بينهما،
-    يتم تعيين وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة.
+    إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
+    وحساب مستويات الدعم والمقاومة وفقًا لنقاط الارتداد بحيث:
+      - المقاومة: مستوى فوق السعر الحالي ظهر فيه ارتداد ≥ 5 مرات.
+      - الدعم: مستوى تحت السعر الحالي ظهر فيه ارتداد ≥ 5 مرات.
+    إذا كان السعر الحالي بين هذين المستوىين، يُعيّن وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -353,7 +312,6 @@ def generate_signal_improved(df, symbol):
         df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
         df['momentum'] = df['close'] - df['close'].shift(10)
 
-        # قائمة الميزات المستخدمة
         features = ['prev_close', 'sma10', 'sma20', 'sma50',
                     'ema10', 'ema20', 'ema50', 'rsi_feature',
                     'atr_feature', 'volatility', 'momentum']
@@ -365,15 +323,11 @@ def generate_signal_improved(df, symbol):
         X = df_features[features]
         y = df_features['close']
 
-        # تقسيم البيانات إلى تدريب واختبار
         X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-
-        # تطبيق القياس المعياري على الميزات
         scaler = StandardScaler()
         X_train_scaled = scaler.fit_transform(X_train)
         X_test_scaled = scaler.transform(X_test)
 
-        # استخدام نموذج تجميعي مع إضافة XGBoost لتحسين الأداء
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
         from xgboost import XGBRegressor
@@ -399,20 +353,24 @@ def generate_signal_improved(df, symbol):
 
         current_price = df['close'].iloc[-1]
 
-        # حساب مستويات الدعم والمقاومة باستخدام نقاط الارتداد
+        # حساب نقاط الارتداد (Pivot Points)
         pivot_lows, pivot_highs = get_pivot_points(df, left=3, right=3)
         low_clusters = cluster_levels(pivot_lows, tolerance=0.002)
         high_clusters = cluster_levels(pivot_highs, tolerance=0.002)
-        support = get_level_from_clusters(low_clusters, min_bounce=3)
-        resistance = get_level_from_clusters(high_clusters, min_bounce=3)
+
+        # الحصول على الدعم والمقاومة وفقًا للشروط:
+        # المقاومة: مستوى فوق السعر الحالي مع ارتداد ≥ 5 مرات.
+        # الدعم: مستوى تحت السعر الحالي مع ارتداد ≥ 5 مرات.
+        resistance = get_resistance_from_clusters(high_clusters, current_price, min_bounce=5)
+        support = get_support_from_clusters(low_clusters, current_price, min_bounce=5)
 
         if support is None or resistance is None:
             logger.info(f"تجاهل {symbol} - لم يتم تحديد مستويات دعم/مقاومة صالحة")
             return None
 
         # التأكد من أن السعر الحالي يقع بين الدعم والمقاومة
-        if current_price <= support or current_price >= resistance:
-            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) ليس بين مستويات الدعم ({support}) والمقاومة ({resistance})")
+        if not (support < current_price < resistance):
+            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) ليس بين الدعم ({support}) والمقاومة ({resistance})")
             return None
 
         # تعيين وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة
@@ -440,9 +398,6 @@ def generate_signal_improved(df, symbol):
         return None
 
 def get_market_dominance():
-    """
-    الحصول على نسب السيطرة على السوق للبيتكوين والإيثيريوم من CoinGecko.
-    """
     try:
         url = "https://api.coingecko.com/api/v3/global"
         response = requests.get(url, timeout=10)
@@ -526,11 +481,11 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
         response = requests.post(url, json=payload, timeout=10)
         logger.info(f"رد Telegram: {response.status_code} {response.text}")
         if response.status_code != 200:
-            logger.error(f"فشل إرسال إشعار توصية الشراء للزوج {signal['symbol']}: {response.status_code} {response.text}")
+            logger.error(f"فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {response.status_code} {response.text}")
         else:
-            logger.info(f"تم إرسال إشعار توصية الشراء للزوج {signal['symbol']} بنجاح")
+            logger.info(f"تم إرسال إشعار التوصية للزوج {signal['symbol']} بنجاح")
     except Exception as e:
-        logger.error(f"فشل إرسال إشعار توصية الشراء للزوج {signal['symbol']}: {e}")
+        logger.error(f"فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {e}")
 
 def send_telegram_alert_special(message):
     try:
@@ -607,10 +562,6 @@ def send_report(target_chat_id):
 
 # ---------------------- خدمة تتبع الإشارات ----------------------
 def track_signals():
-    """
-    تتبع الإشارات النشطة وإرسال التنبيهات عند تحقيق الهدف أو تفعيل وقف الخسارة.
-    يتم استخدام بيانات التيكر المحدثة عبر WebSocket لتفادي طلبات REST المتكررة.
-    """
     logger.info("بدء خدمة تتبع الإشارات...")
     while True:
         try:
@@ -627,13 +578,12 @@ def track_signals():
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss = signal
                 try:
-                    # استخدام بيانات التيكر من WebSocket لتحديد السعر الحالي
                     if symbol in ticker_data:
                         current_price = float(ticker_data[symbol].get('c', 0))
                     else:
                         logger.warning(f"لا يوجد تحديث أسعار لحظة {symbol} من WebSocket")
                         continue
-                    logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
+                    logger.info(f"فحص {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
                     if abs(entry) < 1e-8:
                         logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
@@ -683,14 +633,6 @@ def track_signals():
 
 # ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
-    """
-    فحص جميع الأزواج وفق الشروط المحددة:
-      - توفر بيانات تاريخية كافية (3 أيام من البيانات)
-      - السيولة في آخر 15 دقيقة لا تقل عن الحد المطلوب
-      - شروط نموذج التنبؤ وإشارات المؤشرات الفنية (Ichimoku, RSI، الخ)
-      - شرط اتجاه BTC على فريم 4H صعودي/مستقر
-      - عدم وجود توصية سابقة نشطة (أقل من 4)
-    """
     logger.info("بدء فحص الأزواج الآن...")
     check_db_connection()
     
@@ -717,7 +659,7 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)  # بيانات آخر 3 أيام
+            df = fetch_historical_data(symbol)  # بيانات لمدة يومين على فريم 5 دقائق
             if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
@@ -725,7 +667,6 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            # استخدام النموذج المحسن لتوليد الإشارة
             signal = generate_signal_improved(df, symbol)
             if not signal:
                 continue
@@ -770,7 +711,6 @@ def analyze_market():
     logger.info("انتهى فحص جميع الأزواج")
 
 def test_telegram():
-    """دالة لاختبار إرسال رسالة عبر Telegram"""
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {'chat_id': chat_id, 'text': 'رسالة اختبار من البوت', 'parse_mode': 'Markdown'}
@@ -780,7 +720,6 @@ def test_telegram():
         logger.error(f"فشل إرسال رسالة الاختبار: {e}")
 
 def run_flask():
-    """تشغيل خادم الويب باستخدام متغير البيئة PORT إن وجد"""
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
@@ -794,7 +733,6 @@ if __name__ == '__main__':
     test_telegram()
     logger.info("✅ تم بدء التشغيل بنجاح!")
     
-    # جدولة فحص الأزواج كل 5 دقائق
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=5)
     scheduler.start()
