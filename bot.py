@@ -86,6 +86,10 @@ def check_db_connection():
 # ---------------------- إعداد عميل Binance ----------------------
 client = Client(api_key, api_secret)
 
+# ---------------------- آلية التخزين المؤقت للبيانات ----------------------
+historical_data_cache = {}   # يخزن: { symbol: (timestamp, dataframe) }
+volume_data_cache = {}       # يخزن: { symbol: (timestamp, volume) }
+
 # ---------------------- استخدام WebSocket لتحديث بيانات التيكر ----------------------
 ticker_data = {}
 
@@ -134,7 +138,7 @@ def webhook():
 
 def set_telegram_webhook():
     # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -159,8 +163,16 @@ def get_crypto_symbols():
 
 def fetch_historical_data(symbol, interval='5m', days=2):
     """
-    جلب البيانات التاريخية لمدة يومين على فريم 5 دقائق.
+    جلب البيانات التاريخية لمدة يومين على فريم 5 دقائق مع استخدام التخزين المؤقت لمدة 5 دقائق.
     """
+    cache_duration = 300  # 5 دقائق
+    current_time = time.time()
+    if symbol in historical_data_cache:
+        cached_timestamp, cached_df = historical_data_cache[symbol]
+        if current_time - cached_timestamp < cache_duration:
+            logger.info(f"استخدام البيانات المؤقتة للزوج {symbol}")
+            return cached_df
+
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -172,16 +184,29 @@ def fetch_historical_data(symbol, interval='5m', days=2):
         df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
         logger.info(f"تم جلب {len(df)} صف من البيانات للزوج: {symbol}")
-        return df[['timestamp', 'open', 'high', 'low', 'close']]
+        historical_data_cache[symbol] = (current_time, df[['timestamp', 'open', 'high', 'low', 'close']])
+        return historical_data_cache[symbol][1]
     except Exception as e:
         logger.error(f"خطأ في جلب البيانات لـ {symbol}: {e}")
         return None
 
 def fetch_recent_volume(symbol):
+    """
+    جلب حجم السيولة في آخر 15 دقيقة مع استخدام تخزين مؤقت لمدة 30 ثانية.
+    """
+    cache_duration = 30  # 30 ثانية
+    current_time = time.time()
+    if symbol in volume_data_cache:
+        cached_timestamp, cached_volume = volume_data_cache[symbol]
+        if current_time - cached_timestamp < cache_duration:
+            logger.info(f"استخدام حجم السيولة المؤقت للزوج {symbol}")
+            return cached_volume
+
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
         logger.info(f"حجم السيولة للزوج {symbol} في آخر 15 دقيقة: {volume:,.2f} USDT")
+        volume_data_cache[symbol] = (current_time, volume)
         return volume
     except Exception as e:
         logger.error(f"خطأ في جلب حجم {symbol}: {e}")
@@ -237,8 +262,8 @@ def calculate_atr_series(df, period=14):
 def calculate_price_channel(df_day):
     """
     حساب القناة السعرية باستخدام بيانات اليوم:
-      - الحد الأدنى (الدعم) هو أدنى سعر خلال الفترة.
-      - الحد الأعلى (المقاومة) هو أعلى سعر خلال الفترة.
+      - الحد الأدنى للقناة (الدعم) هو أدنى سعر خلال الفترة.
+      - الحد الأعلى للقناة (المقاومة) هو أعلى سعر خلال الفترة.
     """
     lower_channel = df_day['low'].min()
     upper_channel = df_day['high'].max()
