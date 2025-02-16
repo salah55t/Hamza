@@ -133,7 +133,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # يجب تعديل الرابط أدناه ليناسب عنوان التطبيق المنشور (مثلاً على Render)
+    # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
     webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
@@ -233,64 +233,27 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# دوال حساب نقاط الارتداد (Pivot Points)
-def get_pivot_points(df, left=3, right=3):
-    pivot_lows = []
-    pivot_highs = []
-    for i in range(left, len(df) - right):
-        low = df['low'].iloc[i]
-        if all(low < df['low'].iloc[i - j] for j in range(1, left + 1)) and \
-           all(low < df['low'].iloc[i + j] for j in range(1, right + 1)):
-            pivot_lows.append((i, low))
-        high = df['high'].iloc[i]
-        if all(high > df['high'].iloc[i - j] for j in range(1, left + 1)) and \
-           all(high > df['high'].iloc[i + j] for j in range(1, right + 1)):
-            pivot_highs.append((i, high))
-    return pivot_lows, pivot_highs
-
-def cluster_levels(pivots, tolerance=0.002):
-    clusters = []
-    for idx, price in pivots:
-        placed = False
-        for cluster in clusters:
-            if abs(cluster[0] - price) / cluster[0] < tolerance:
-                # تحديث المتوسط وعدد الارتدادات
-                cluster[0] = (cluster[0] * cluster[1] + price) / (cluster[1] + 1)
-                cluster[1] += 1
-                placed = True
-                break
-        if not placed:
-            clusters.append([price, 1])
-    return clusters
-
-def get_resistance_from_clusters(clusters, current_price, min_bounce=5):
-    # اختيار المستوى الذي يقع فوق السعر الحالي ويملك عدد ارتدادات ≥ 5
-    valid = [c for c in clusters if c[1] >= min_bounce and c[0] > current_price]
-    if valid:
-        # اختيار المقاومة الأقرب (أقل مستوى)
-        best = min(valid, key=lambda x: x[0])
-        return best[0]
-    else:
-        return None
-
-def get_support_from_clusters(clusters, current_price, min_bounce=5):
-    # اختيار المستوى الذي يقع تحت السعر الحالي ويملك عدد ارتدادات ≥ 5
-    valid = [c for c in clusters if c[1] >= min_bounce and c[0] < current_price]
-    if valid:
-        # اختيار الدعم الأقرب (أعلى مستوى)
-        best = max(valid, key=lambda x: x[0])
-        return best[0]
-    else:
-        return None
+# ---------------------- دوال حساب مستويات فيبوناتشي ----------------------
+# لحساب المقاومة: المستوى 0 هو أدنى سعر في اليوم، والمستوى 1 هو أعلى سعر.
+# ثم المقاومة = lowest + 0.618 * (highest - lowest)
+# لحساب الدعم: المستوى 0 هو أعلى سعر في اليوم، والمستوى 1 هو أدنى سعر.
+# ثم الدعم = highest - 0.618 * (highest - lowest)
+def calculate_fibonacci_levels(df_day):
+    highest = df_day['high'].max()
+    lowest = df_day['low'].min()
+    resistance = lowest + 0.618 * (highest - lowest)
+    support = highest - 0.618 * (highest - lowest)
+    return support, resistance
 
 # ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
-    وحساب مستويات الدعم والمقاومة وفقًا لنقاط الارتداد بحيث:
-      - المقاومة: مستوى فوق السعر الحالي ظهر فيه ارتداد ≥ 5 مرات.
-      - الدعم: مستوى تحت السعر الحالي ظهر فيه ارتداد ≥ 5 مرات.
-    إذا كان السعر الحالي بين هذين المستوىين، يُعيّن وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة.
+    وحساب مستويات الدعم والمقاومة باستخدام مستويات فيبوناتشي بحيث:
+      - لتحديد المقاومة: نستخدم أدنى سعر ويومياً كـ 0 وأعلى سعر كـ 1، والمستوى 0.618 هو المقاومة.
+      - لتحديد الدعم: نستخدم أعلى سعر ويومياً كـ 0 وأدنى سعر كـ 1، والمستوى 0.618 هو الدعم.
+    يجب أن يكون السعر الحالي ضمن النطاق بين الدعم والمقاومة.
+    إذا تحقق ذلك، يتم تعيين وقف الخسارة عند مستوى الدعم.
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -353,27 +316,19 @@ def generate_signal_improved(df, symbol):
 
         current_price = df['close'].iloc[-1]
 
-        # حساب نقاط الارتداد (Pivot Points)
-        pivot_lows, pivot_highs = get_pivot_points(df, left=3, right=3)
-        low_clusters = cluster_levels(pivot_lows, tolerance=0.002)
-        high_clusters = cluster_levels(pivot_highs, tolerance=0.002)
+        # حساب مستويات فيبوناتشي باستخدام بيانات يوم واحد على فريم 15 دقيقة
+        # نستخدم آخر 288 شمعة (إذا كانت متوفرة)
+        if len(df) >= 288:
+            day_df = df.tail(288)
+        else:
+            day_df = df
+        support, resistance = calculate_fibonacci_levels(day_df)
 
-        # الحصول على الدعم والمقاومة وفقًا للشروط:
-        # المقاومة: مستوى فوق السعر الحالي مع ارتداد ≥ 5 مرات.
-        # الدعم: مستوى تحت السعر الحالي مع ارتداد ≥ 5 مرات.
-        resistance = get_resistance_from_clusters(high_clusters, current_price, min_bounce=5)
-        support = get_support_from_clusters(low_clusters, current_price, min_bounce=5)
-
-        if support is None or resistance is None:
-            logger.info(f"تجاهل {symbol} - لم يتم تحديد مستويات دعم/مقاومة صالحة")
-            return None
-
-        # التأكد من أن السعر الحالي يقع بين الدعم والمقاومة
+        # التأكد من أن المقاومة أعلى من السعر الحالي والدعم أقل من السعر الحالي
         if not (support < current_price < resistance):
-            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) ليس بين الدعم ({support}) والمقاومة ({resistance})")
+            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) يجب أن يكون ضمن النطاق بين الدعم ({support}) والمقاومة ({resistance})")
             return None
 
-        # تعيين وقف الخسارة عند مستوى الدعم والهدف عند مستوى المقاومة
         stop_loss = support
         target = resistance
 
