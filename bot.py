@@ -10,29 +10,14 @@ from threading import Thread
 import logging
 import requests
 import json  # لاستخدام reply_markup في تنبيهات Telegram
+from sklearn.model_selection import train_test_split
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-from sklearn.metrics import r2_score
-from sklearn.preprocessing import StandardScaler
 
-# ---------------------- إعدادات التداول اليومي ----------------------
-# استخدام بيانات الشموع بمدة 15 دقيقة وجمع بيانات لمدة 3 أيام للتدريب
-BASE_INTERVAL = '15m'
-TRAINING_DAYS = 3   # زيادة فترة البيانات لتحسين التدريب
-SIGNAL_DAYS = 1     # استخدام يوم واحد لإصدار الإشارات
-
-# إعدادات المؤشرات الخاصة بالتداول اليومي
-RSI_PERIOD = 14
-ATR_PERIOD = 10
-ICHIMOKU_TENKAN = 7
-ICHIMOKU_KIJUN = 21
-ICHIMOKU_SENKOU = 42
-ICHIMOKU_DISPLACEMENT = 21
-SMA_PERIOD_SHORT = 8    # متوسط متحرك بسيط للفترة القصيرة
-SMA_PERIOD_LONG = 16    # متوسط متحرك بسيط للفترة الطويلة
-EMA_PERIOD_SHORT = 8    # متوسط متحرك أسي للفترة القصيرة
-EMA_PERIOD_LONG = 16    # متوسط متحرك أسي للفترة الطويلة
-MOMENTUM_PERIOD = 8     # فترة حساب الزخم
+# مكتبات التعلم العميق لنموذج LSTM
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from sklearn.preprocessing import MinMaxScaler
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -57,6 +42,9 @@ logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
 
 # قيمة الصفقة الثابتة للتوصيات
 TRADE_VALUE = 10
+
+# استخدام نموذج LSTM المتقدم بدلاً من النموذج التجميعي التقليدي
+USE_LSTM_MODEL = True
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -112,7 +100,10 @@ client = Client(api_key, api_secret)
 ticker_data = {}
 
 def handle_ticker_message(msg):
-    """تحديث بيانات التيكر عند استقبال رسالة من WebSocket."""
+    """
+    عند استقبال رسالة من WebSocket يتم تحديث البيانات في ticker_data
+    بحيث يكون المفتاح هو رمز الزوج (Symbol).
+    """
     try:
         if isinstance(msg, list):
             for m in msg:
@@ -127,7 +118,9 @@ def handle_ticker_message(msg):
         logger.error(f"خطأ في handle_ticker_message: {e}")
 
 def run_ticker_socket_manager():
-    """تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج."""
+    """
+    تشغيل WebSocket لتحديث بيانات التيكر لجميع الأزواج.
+    """
     try:
         twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
         twm.start()
@@ -157,7 +150,8 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://your-domain.com/webhook"  # عدل هذا حسب بيئتك
+    # عدل عنوان الـ Webhook حسب بيئتك
+    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -169,21 +163,9 @@ def set_telegram_webhook():
     except Exception as e:
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
 
-# ---------------------- دوال حساب المؤشرات الفنية ----------------------
-def calculate_macd(df, fast_period=12, slow_period=26, signal_period=9):
-    """حساب مؤشر MACD ومكوناته."""
-    ema_fast = df['close'].ewm(span=fast_period, adjust=False).mean()
-    ema_slow = df['close'].ewm(span=slow_period, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
-    histogram = macd_line - signal_line
-    df['macd'] = macd_line
-    df['macd_signal'] = signal_line
-    df['macd_hist'] = histogram
-    return df
-
+# ---------------------- وظائف تحليل البيانات والمؤشرات ----------------------
 def get_crypto_symbols():
-    """قراءة قائمة العملات من ملف وإضافة 'USDT' لكل عملة."""
+    """قراءة الأزواج من الملف وإضافة USDT"""
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
@@ -193,10 +175,10 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval=BASE_INTERVAL, days=TRAINING_DAYS):
-    """جلب البيانات التاريخية باستخدام الفترة المحددة."""
+def fetch_historical_data(symbol, interval='5m', days=3):
+    """جلب البيانات التاريخية المطلوبة لحساب المؤشرات"""
     try:
-        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval} لمدة {days} يوم")
+        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -214,7 +196,7 @@ def fetch_historical_data(symbol, interval=BASE_INTERVAL, days=TRAINING_DAYS):
         return None
 
 def fetch_recent_volume(symbol):
-    """حساب حجم السيولة في آخر 15 دقيقة."""
+    """حساب حجم السيولة في آخر 15 دقيقة"""
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
@@ -225,16 +207,14 @@ def fetch_recent_volume(symbol):
         return 0
 
 def calculate_volatility(df):
-    """حساب التقلب باستخدام بيانات الإغلاق."""
+    """حساب التقلب باستخدام بيانات الإغلاق فقط"""
     df['returns'] = df['close'].pct_change()
-    # تحويل يعتمد على 15 دقيقة (حوالي 96 شمعه في اليوم)
-    vol = df['returns'].std() * np.sqrt(24 * 60 / 15) * 100
+    vol = df['returns'].std() * np.sqrt(24 * 60 / 5) * 100
     logger.info(f"تم حساب التقلب: {vol:.2f}%")
     return vol
 
-def calculate_ichimoku(df, tenkan=ICHIMOKU_TENKAN, kijun=ICHIMOKU_KIJUN,
-                       senkou_b=ICHIMOKU_SENKOU, displacement=ICHIMOKU_DISPLACEMENT):
-    """حساب مؤشر الاشموكو."""
+def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
+    """حساب مؤشر الاشموكو"""
     logger.info("بدء حساب مؤشر الاشموكو")
     period9_high = df['high'].rolling(window=tenkan).max()
     period9_low = df['low'].rolling(window=tenkan).min()
@@ -250,8 +230,8 @@ def calculate_ichimoku(df, tenkan=ICHIMOKU_TENKAN, kijun=ICHIMOKU_KIJUN,
     logger.info("انتهى حساب مؤشر الاشموكو")
     return df
 
-def calculate_rsi(df, period=RSI_PERIOD):
-    """حساب مؤشر RSI."""
+def calculate_rsi(df, period=14):
+    """حساب مؤشر RSI"""
     logger.info("بدء حساب مؤشر RSI")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -264,8 +244,8 @@ def calculate_rsi(df, period=RSI_PERIOD):
     logger.info(f"تم حساب RSI: {last_rsi:.2f}")
     return rsi
 
-def calculate_atr(df, period=ATR_PERIOD):
-    """حساب مؤشر ATR."""
+def calculate_atr(df, period=14):
+    """حساب مؤشر ATR (متوسط المدى الحقيقي)"""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -274,8 +254,8 @@ def calculate_atr(df, period=ATR_PERIOD):
     logger.info(f"تم حساب ATR: {atr:.8f}")
     return atr
 
-def calculate_atr_series(df, period=ATR_PERIOD):
-    """حساب سلسلة ATR."""
+def calculate_atr_series(df, period=14):
+    """حساب سلسلة ATR لكل صف"""
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -283,51 +263,41 @@ def calculate_atr_series(df, period=ATR_PERIOD):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- تحسين نموذج التنبؤ ----------------------
+# ---------------------- نماذج التنبؤ وإدارة المخاطر ----------------------
 def generate_signal_improved(df, symbol):
     """
-    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية للتداول اليومي.
-    نستخدم 3 أيام من البيانات للتدريب ونقسم البيانات بالتسلسل الزمني.
+    إنشاء إشارة تداول باستخدام نموذج تجميعي مع ميزات إضافية.
+    (هذا النموذج التقليدي متاح في حال رغبتك بالمقارنة)
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
         df = df.dropna().reset_index(drop=True)
-        if len(df) < 20:
+        if len(df) < 100:
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الفنية
+        # حساب بعض الميزات الفنية
         df['prev_close'] = df['close'].shift(1)
-        df['sma_short'] = df['close'].rolling(window=SMA_PERIOD_SHORT).mean().shift(1)
-        df['sma_long'] = df['close'].rolling(window=SMA_PERIOD_LONG).mean().shift(1)
-        df['ema_short'] = df['close'].ewm(span=EMA_PERIOD_SHORT, adjust=False).mean().shift(1)
-        df['ema_long'] = df['close'].ewm(span=EMA_PERIOD_LONG, adjust=False).mean().shift(1)
-        df['rsi_feature'] = calculate_rsi(df, period=RSI_PERIOD).shift(1)
-        df['atr_feature'] = calculate_atr_series(df, period=ATR_PERIOD).shift(1)
-        df['volatility'] = df['close'].pct_change().rolling(window=SMA_PERIOD_SHORT).std().shift(1)
-        df['momentum'] = df['close'] - df['close'].shift(MOMENTUM_PERIOD)
-        # حساب MACD وإضافته
-        df = calculate_macd(df)
-        features = ['prev_close', 'sma_short', 'sma_long', 'ema_short', 'ema_long',
-                    'rsi_feature', 'atr_feature', 'volatility', 'momentum',
-                    'macd', 'macd_signal', 'macd_hist']
+        df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
+        df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
+        df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
+        df['rsi_feature'] = calculate_rsi(df).shift(1)
+        df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
+        df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
+        df['momentum'] = df['close'] - df['close'].shift(10)
+        
+        features = ['prev_close', 'sma10', 'sma20', 'ema10', 'ema20',
+                    'rsi_feature', 'atr_feature', 'volatility', 'momentum']
         df_features = df.dropna().reset_index(drop=True)
-        if len(df_features) < 20:
+        if len(df_features) < 50:
             logger.warning(f"بيانات الميزات لـ {symbol} غير كافية")
             return None
 
         X = df_features[features]
         y = df_features['close']
 
-        # تقسيم البيانات بالتسلسل الزمني (80% للتدريب)
-        split_idx = int(0.8 * len(X))
-        X_train, X_test = X[:split_idx], X[split_idx:]
-        y_train, y_test = y[:split_idx], y[split_idx:]
-
-        # يمكن استخدام التطبيع لتحسين النموذج
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
         from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
         from sklearn.linear_model import Ridge
@@ -344,16 +314,17 @@ def generate_signal_improved(df, symbol):
             ('ridge', model4)
         ])
 
-        voting_reg.fit(X_train_scaled, y_train)
-        y_pred = voting_reg.predict(X_test_scaled)
-        score = r2_score(y_test, y_pred)
+        voting_reg.fit(X_train, y_train)
+        score = voting_reg.score(X_test, y_test)
         confidence = round(score * 100, 2)
         logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
 
         current_price = df['close'].iloc[-1]
-        current_atr = calculate_atr(df, period=ATR_PERIOD)
+        current_atr = calculate_atr(df, period=14)
+        if current_atr / current_price > 0.03:
+            logger.info(f"تجاهل {symbol} - تقلب مرتفع (ATR/S= {current_atr/current_price:.4f})")
+            return None
 
-        # تحديد الهدف ووقف الخسارة
         atr_multiplier_target = 1.5
         atr_multiplier_stop = 1.0
         target = current_price + atr_multiplier_target * current_atr
@@ -371,7 +342,7 @@ def generate_signal_improved(df, symbol):
             logger.info(f"تجاهل {symbol} - نسبة المخاطرة/العائد أقل من {desired_ratio}")
             return None
 
-        if confidence < 80:
+        if confidence < 97:
             logger.info(f"تجاهل {symbol} - ثقة النموذج ({confidence}%) أقل من المطلوب")
             return None
 
@@ -391,8 +362,85 @@ def generate_signal_improved(df, symbol):
         logger.error(f"خطأ في توليد إشارة محسن للزوج {symbol}: {e}")
         return None
 
+def generate_signal_lstm(df, symbol):
+    """
+    إنشاء إشارة تداول باستخدام نموذج LSTM المتقدم.
+    يعتمد النموذج على بيانات أسعار الإغلاق للتنبؤ بالسعر التالي،
+    ومن ثم تحديد الهدف ووقف الخسارة بناءً على مؤشر ATR.
+    """
+    logger.info(f"بدء توليد إشارة LSTM للزوج: {symbol}")
+    try:
+        df = df.dropna().reset_index(drop=True)
+        if len(df) < 120:
+            logger.warning(f"بيانات {symbol} غير كافية للنموذج LSTM")
+            return None
+
+        # استخدام عمود 'close' للتنبؤ بالسعر
+        prices = df['close'].values.reshape(-1, 1)
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_prices = scaler.fit_transform(prices)
+
+        window_size = 20
+        X, y = [], []
+        for i in range(window_size, len(scaled_prices)):
+            X.append(scaled_prices[i - window_size:i, 0])
+            y.append(scaled_prices[i, 0])
+        X, y = np.array(X), np.array(y)
+        X = np.reshape(X, (X.shape[0], X.shape[1], 1))
+
+        split = int(0.8 * len(X))
+        X_train, X_test = X[:split], X[split:]
+        y_train, y_test = y[:split], y[split:]
+
+        # بناء نموذج LSTM
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=True, input_shape=(X_train.shape[1], 1)))
+        model.add(LSTM(50))
+        model.add(Dense(1))
+        model.compile(optimizer='adam', loss='mean_squared_error')
+
+        model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+        loss = model.evaluate(X_test, y_test, verbose=0)
+        confidence = round((1 - loss) * 100, 2)
+        logger.info(f"ثقة نموذج LSTM لـ {symbol}: {confidence}%")
+
+        # التنبؤ بالسعر التالي
+        last_window = scaled_prices[-window_size:]
+        last_window = np.reshape(last_window, (1, window_size, 1))
+        predicted_scaled = model.predict(last_window)
+        predicted_price = scaler.inverse_transform(predicted_scaled)[0][0]
+        current_price = df['close'].iloc[-1]
+
+        current_atr = calculate_atr(df, period=14)
+        atr_multiplier_target = 1.5
+        atr_multiplier_stop = 1.0
+        target = current_price + atr_multiplier_target * current_atr
+        stop_loss = current_price - atr_multiplier_stop * current_atr
+
+        if confidence < 97:
+            logger.info(f"تجاهل {symbol} - ثقة نموذج LSTM ({confidence}%) أقل من المطلوب")
+            return None
+
+        signal = {
+            'symbol': symbol,
+            'price': float(format(current_price, '.4f')),
+            'target': float(format(target, '.4f')),
+            'stop_loss': float(format(stop_loss, '.4f')),
+            'confidence': confidence,
+            'atr': round(current_atr, 8),
+            'trade_value': TRADE_VALUE
+        }
+        logger.info(f"تم توليد إشارة LSTM للزوج {symbol}: {signal}")
+        return signal
+
+    except Exception as e:
+        logger.error(f"خطأ في توليد إشارة LSTM للزوج {symbol}: {e}")
+        return None
+
 def get_market_dominance():
-    """الحصول على نسب السيطرة على السوق من CoinGecko."""
+    """
+    الحصول على نسب السيطرة على السوق للبيتكوين والإيثيريوم من CoinGecko.
+    """
     try:
         url = "https://api.coingecko.com/api/v3/global"
         response = requests.get(url, timeout=10)
@@ -658,14 +706,18 @@ def analyze_market():
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
             df = fetch_historical_data(symbol)
-            if df is None or len(df) < 20:
+            if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            signal = generate_signal_improved(df, symbol)
+            # اختيار النموذج المناسب بناءً على الإعداد
+            if USE_LSTM_MODEL:
+                signal = generate_signal_lstm(df, symbol)
+            else:
+                signal = generate_signal_improved(df, symbol)
             if not signal:
                 continue
             ichimoku_df = calculate_ichimoku(df.copy())
@@ -676,7 +728,7 @@ def analyze_market():
             if last_row['tenkan_sen'] <= last_row['kijun_sen']:
                 logger.info(f"تجاهل {symbol} - تقاطع مؤشر الاشموكو غير صعودي")
                 continue
-            rsi_series = calculate_rsi(df, period=RSI_PERIOD)
+            rsi_series = calculate_rsi(df)
             last_rsi = rsi_series.iloc[-1]
             if last_rsi > 30:
                 logger.info(f"تجاهل {symbol} - شرط RSI غير مستوفى (RSI = {last_rsi:.2f})")
@@ -709,7 +761,7 @@ def analyze_market():
     logger.info("انتهى فحص جميع الأزواج")
 
 def test_telegram():
-    """دالة لاختبار إرسال رسالة عبر Telegram."""
+    """دالة لاختبار إرسال رسالة عبر Telegram"""
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {'chat_id': chat_id, 'text': 'رسالة اختبار من البوت', 'parse_mode': 'Markdown'}
@@ -719,7 +771,7 @@ def test_telegram():
         logger.error(f"فشل إرسال رسالة الاختبار: {e}")
 
 def run_flask():
-    """تشغيل خادم الويب باستخدام متغير البيئة PORT إن وجد."""
+    """تشغيل خادم الويب باستخدام متغير البيئة PORT إن وجد"""
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
