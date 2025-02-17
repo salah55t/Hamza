@@ -258,12 +258,12 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- دوال حساب القناة السعرية ----------------------
+# ---------------------- دوال حساب القناة السعرية (باستخدام بيانات يوم واحد على فريم 15 دقيقة) ----------------------
 def calculate_price_channel(df_day):
     """
     حساب القناة السعرية باستخدام بيانات اليوم:
-      - الحد الأدنى للقناة (الدعم) هو أدنى سعر خلال الفترة.
-      - الحد الأعلى للقناة (المقاومة) هو أعلى سعر خلال الفترة.
+      - الدعم: أدنى سعر خلال الفترة.
+      - المقاومة: أعلى سعر خلال الفترة.
     """
     lower_channel = df_day['low'].min()
     upper_channel = df_day['high'].max()
@@ -273,11 +273,13 @@ def calculate_price_channel(df_day):
 def generate_signal_improved(df, symbol):
     """
     إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
-    والاعتماد على القناة السعرية (Donchian Channel) لتحديد الهدف ووقف الخسارة.
-    يتم حساب القناة باستخدام بيانات يوم واحد على فريم 15 دقيقة (آخر 96 شمعة).
-    يجب أن يكون السعر الحالي ضمن النطاق بين الدعم والمقاومة.
-    - وقف الخسارة يُعيّن عند الحد الأدنى للقناة (الدعم).
-    - الهدف يُعيّن عند الحد الأعلى للقناة (المقاومة).
+    والاعتماد على القناة السعرية (Donchian Channel) لتحديد الهدف ووقف الخسارة
+    باستخدام طريقة إحصائية تعتمد على الانحراف المعياري لعوائد اليوم.
+    يتم حساب بيانات اليوم من بيانات فريم 15 دقيقة (آخر 96 شمعة).
+    إذا كان السعر الحالي ضمن النطاق بين الدعم والمقاومة،
+    يتم تعيين:
+      - الهدف = السعر الحالي + (2 × (std_return × السعر الحالي))
+      - وقف الخسارة = السعر الحالي - (1 × (std_return × السعر الحالي))
     """
     logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
     try:
@@ -286,7 +288,7 @@ def generate_signal_improved(df, symbol):
             logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
             return None
 
-        # حساب الميزات الإضافية
+        # حساب الميزات الإضافية (كما في النسخة السابقة)
         df['prev_close'] = df['close'].shift(1)
         df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
         df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -340,22 +342,28 @@ def generate_signal_improved(df, symbol):
 
         current_price = df['close'].iloc[-1]
 
-        # حساب القناة السعرية باستخدام بيانات يوم واحد على فريم 15 دقيقة
-        # نستخدم آخر 96 شمعة (يوم كامل إذا كانت الشموع كل 15 دقيقة)
+        # حساب بيانات اليوم على فريم 15 دقيقة (نستخدم آخر 96 شمعة)
         if len(df) >= 96:
             day_df = df.tail(96)
         else:
             day_df = df
-        lower_channel, upper_channel = calculate_price_channel(day_df)
 
-        # التأكد من أن السعر الحالي يقع ضمن القناة السعرية
+        # حساب القناة السعرية باستخدام بيانات اليوم (يمكن استخدامها للتحقق من النطاق)
+        lower_channel, upper_channel = calculate_price_channel(day_df)
         if not (lower_channel < current_price < upper_channel):
             logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) خارج نطاق القناة السعرية (من {lower_channel} إلى {upper_channel})")
             return None
 
-        # تعيين وقف الخسارة عند الحد الأدنى للقناة (الدعم) والهدف عند الحد الأعلى للقناة (المقاومة)
-        stop_loss = lower_channel
-        target = upper_channel
+        # حساب الانحراف المعياري لعوائد اليوم
+        returns = day_df['close'].pct_change().dropna()
+        std_returns = returns.std()
+        logger.info(f"الانحراف المعياري لعوائد اليوم للزوج {symbol}: {std_returns:.4f}")
+
+        # تحديد الهدف ووقف الخسارة بطريقة إحصائية:
+        # الهدف = السعر الحالي + (2 × (std_returns × السعر الحالي))
+        # وقف الخسارة = السعر الحالي - (1 × (std_returns × السعر الحالي))
+        target = current_price + 2 * std_returns * current_price
+        stop_loss = current_price - 1 * std_returns * current_price
 
         decimals = 8 if current_price < 1 else 4
         rounded_price = float(format(current_price, f'.{decimals}f'))
@@ -396,36 +404,10 @@ def get_market_dominance():
         return None, None
 
 # ---------------------- فحص اتجاه BTC ----------------------
-cached_btc_trend = None
-cached_btc_trend_timestamp = 0
-BTC_TREND_CACHE_INTERVAL = 3600  # 1 ساعة
-
+# تمت إزالة شرط اختبار اتجاه البيتكوين (BTC) من النظام، إذ لم يعد هناك شرط لصعود البيتكوين.
 def check_btc_trend():
-    logger.info("بدء فحص اتجاه BTCUSDT على فريم 4H")
-    global cached_btc_trend, cached_btc_trend_timestamp
-    try:
-        now = time.time()
-        if cached_btc_trend is not None and (now - cached_btc_trend_timestamp < BTC_TREND_CACHE_INTERVAL):
-            logger.info("استخدام نتيجة الاتجاه المخزنة مؤقتاً")
-            return cached_btc_trend
-
-        btc_df = fetch_historical_data("BTCUSDT", interval="4h", days=10)
-        if btc_df is None or len(btc_df) < 50:
-            logger.warning("بيانات BTCUSDT غير كافية لفحص الاتجاه")
-            return False
-
-        btc_df['close'] = btc_df['close'].astype(float)
-        sma50 = btc_df['close'].rolling(window=50).mean()
-        current_btc_price = btc_df['close'].iloc[-1]
-        current_sma50 = sma50.iloc[-1]
-        trend = current_btc_price >= current_sma50
-        cached_btc_trend = trend
-        cached_btc_trend_timestamp = now
-        logger.info(f"BTCUSDT: السعر الحالي {current_btc_price}, SMA50 {current_sma50}, الاتجاه: {'صعودي/مستقر' if trend else 'هبوطي'}")
-        return trend
-    except Exception as e:
-        logger.error(f"خطأ في فحص اتجاه BTC: {e}")
-        return False
+    # تم الاحتفاظ بهذه الدالة للإبلاغ فقط (يمكن إرجاع True دائماً)
+    return True
 
 # ---------------------- إرسال التنبيهات عبر Telegram ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
@@ -622,10 +604,8 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    btc_trend = check_btc_trend()
-    if not btc_trend:
-        logger.info("اتجاه BTC (4H) هبوطي؛ لن يتم إرسال التوصيات.")
-        return
+    # تم إزالة شرط اختبار اتجاه البيتكوين (BTC)؛ نعتبره دائماً True.
+    btc_trend = True
 
     btc_dominance, eth_dominance = get_market_dominance()
     if btc_dominance is None or eth_dominance is None:
