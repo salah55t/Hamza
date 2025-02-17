@@ -269,18 +269,28 @@ def calculate_price_channel(df_day):
     upper_channel = df_day['high'].max()
     return lower_channel, upper_channel
 
-# ---------------------- استراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
+# ---------------------- دوال إضافية للاستراتيجية 2 (MACD, Bollinger Bands) ----------------------
+def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
+    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
+    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
+    df['MACD'] = df['ema_short'] - df['ema_long']
+    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
+    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+    return df[['MACD', 'MACD_signal', 'MACD_hist']]
+
+def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
+    sma = df['close'].rolling(window=period).mean()
+    std = df['close'].rolling(window=period).std()
+    upper_band = sma + std_multiplier * std
+    lower_band = sma - std_multiplier * std
+    return lower_band, sma, upper_band
+
+# ---------------------- الاستراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
 def generate_signal_strategy1(df, symbol):
-    """
-    تعتمد الاستراتيجية الأولى على نموذج تجميعي لتوليد إشارة تداول،
-    وتحديد الهدف ووقف الخسارة باستخدام قناة دونتشين على بيانات يوم واحد (آخر 96 شمعة على فريم 15 دقيقة).
-    """
     df = df.dropna().reset_index(drop=True)
     if len(df) < 100:
         logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
         return None
-
-    # حساب الميزات الأساسية
     df['prev_close'] = df['close'].shift(1)
     df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
     df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -298,7 +308,6 @@ def generate_signal_strategy1(df, symbol):
     if len(df_features) < 50:
         logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
         return None
-
     X = df_features[features]
     y = df_features['close']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
@@ -348,22 +357,7 @@ def generate_signal_strategy1(df, symbol):
         'strategy': 'Strategy1'
     }
 
-# ---------------------- استراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
-def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
-    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
-    df['MACD'] = df['ema_short'] - df['ema_long']
-    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
-    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
-    return df[['MACD', 'MACD_signal', 'MACD_hist']]
-
-def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
-    sma = df['close'].rolling(window=period).mean()
-    std = df['close'].rolling(window=period).std()
-    upper_band = sma + std_multiplier * std
-    lower_band = sma - std_multiplier * std
-    return lower_band, sma, upper_band
-
+# ---------------------- الاستراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
 def generate_signal_strategy2(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
@@ -415,6 +409,25 @@ def generate_trade_signal(df, symbol):
         return signal2
     else:
         return None
+
+# ---------------------- دالة الحصول على نسب السيطرة على السوق ----------------------
+def get_market_dominance():
+    try:
+        url = "https://api.coingecko.com/api/v3/global"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            data = response.json().get("data", {})
+            market_cap_percentage = data.get("market_cap_percentage", {})
+            btc_dominance = market_cap_percentage.get("btc")
+            eth_dominance = market_cap_percentage.get("eth")
+            logger.info(f"BTC Dominance: {btc_dominance}%, ETH Dominance: {eth_dominance}%")
+            return btc_dominance, eth_dominance
+        else:
+            logger.error(f"خطأ في جلب نسب السيطرة: {response.status_code} {response.text}")
+            return None, None
+    except Exception as e:
+        logger.error(f"خطأ في get_market_dominance: {e}")
+        return None, None
 
 # ---------------------- دوال إرسال التنبيهات والتقارير ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
@@ -637,7 +650,6 @@ def analyze_market():
             signal = generate_trade_signal(df, symbol)
             if not signal:
                 continue
-            # يمكن التأكيد باستخدام مؤشرات إضافية (Ichimoku وRSI)
             ichimoku_df = calculate_ichimoku(df.copy())
             last_row = ichimoku_df.iloc[-1]
             if last_row['close'] <= max(last_row['senkou_span_a'], last_row['senkou_span_b']):
