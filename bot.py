@@ -86,7 +86,7 @@ def check_db_connection():
 # ---------------------- إعداد عميل Binance ----------------------
 client = Client(api_key, api_secret)
 
-# ---------------------- آلية التخزين المؤقت للبيانات ----------------------
+# ---------------------- آلية التخزين المؤقت ----------------------
 historical_data_cache = {}   # يخزن: { symbol: (timestamp, dataframe) }
 volume_data_cache = {}       # يخزن: { symbol: (timestamp, volume) }
 
@@ -138,7 +138,7 @@ def webhook():
 
 def set_telegram_webhook():
     # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -150,7 +150,7 @@ def set_telegram_webhook():
     except Exception as e:
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
 
-# ---------------------- وظائف تحليل البيانات والمؤشرات ----------------------
+# ---------------------- دوال جلب البيانات والتحليل الفني ----------------------
 def get_crypto_symbols():
     try:
         with open('crypto_list.txt', 'r') as f:
@@ -258,47 +258,29 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- دوال إضافية للاستراتيجية الثانية (MACD & Bollinger Bands) ----------------------
-def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
+# ---------------------- دوال حساب القناة السعرية ----------------------
+def calculate_price_channel(df_day):
     """
-    حساب MACD:
-      MACD = EMA(short_period) - EMA(long_period)
-      Signal = EMA(MACD, signal_period)
-      Histogram = MACD - Signal
+    حساب القناة السعرية باستخدام بيانات اليوم على فريم 15 دقيقة:
+      - الدعم هو أدنى سعر خلال الفترة.
+      - المقاومة هو أعلى سعر خلال الفترة.
     """
-    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
-    df['MACD'] = df['ema_short'] - df['ema_long']
-    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
-    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
-    return df[['MACD', 'MACD_signal', 'MACD_hist']]
-
-def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
-    """
-    حساب Bollinger Bands:
-      Middle Band = SMA(period)
-      Upper Band = Middle Band + (std_multiplier × std)
-      Lower Band = Middle Band - (std_multiplier × std)
-    """
-    sma = df['close'].rolling(window=period).mean()
-    std = df['close'].rolling(window=period).std()
-    upper_band = sma + std_multiplier * std
-    lower_band = sma - std_multiplier * std
-    return lower_band, sma, upper_band
+    lower_channel = df_day['low'].min()
+    upper_channel = df_day['high'].max()
+    return lower_channel, upper_channel
 
 # ---------------------- استراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
 def generate_signal_strategy1(df, symbol):
     """
     تعتمد الاستراتيجية الأولى على نموذج تجميعي لتوليد إشارة تداول،
-    وتحديد الهدف ووقف الخسارة باستخدام قناة دونتشين على بيانات يوم واحد (فريم 15 دقيقة، آخر 96 شمعة).
+    وتحديد الهدف ووقف الخسارة باستخدام قناة دونتشين على بيانات يوم واحد (آخر 96 شمعة على فريم 15 دقيقة).
     """
-    # (تم تطبيق نفس الأسلوب كما في النسخة السابقة)
     df = df.dropna().reset_index(drop=True)
     if len(df) < 100:
         logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
         return None
 
-    # حساب الميزات الأساسية (يمكنك تعديلها)
+    # حساب الميزات الأساسية
     df['prev_close'] = df['close'].shift(1)
     df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
     df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -343,7 +325,6 @@ def generate_signal_strategy1(df, symbol):
     confidence = round(score * 100, 2)
     logger.info(f"ثقة الاستراتيجية 1 لـ {symbol}: {confidence}%")
     current_price = df['close'].iloc[-1]
-    # حساب قناة دونتشين باستخدام بيانات يوم واحد على فريم 15 دقيقة (آخر 96 شمعة)
     if len(df) >= 96:
         day_df = df.tail(96)
     else:
@@ -352,7 +333,6 @@ def generate_signal_strategy1(df, symbol):
     if not (lower_channel < current_price < upper_channel):
         logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة دونتشين")
         return None
-    # هنا يتم استخدام قناة دونتشين لتحديد الهدف ووقف الخسارة
     stop_loss = lower_channel
     target = upper_channel
     rounded_price = float(format(current_price, '.4f'))
@@ -369,54 +349,47 @@ def generate_signal_strategy1(df, symbol):
     }
 
 # ---------------------- استراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
+def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
+    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
+    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
+    df['MACD'] = df['ema_short'] - df['ema_long']
+    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
+    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+    return df[['MACD', 'MACD_signal', 'MACD_hist']]
+
+def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
+    sma = df['close'].rolling(window=period).mean()
+    std = df['close'].rolling(window=period).std()
+    upper_band = sma + std_multiplier * std
+    lower_band = sma - std_multiplier * std
+    return lower_band, sma, upper_band
+
 def generate_signal_strategy2(df, symbol):
-    """
-    تعتمد الاستراتيجية الثانية على مؤشرات MACD وBollinger Bands وRSI:
-      - تُحسب MACD بحيث إذا حدث تقاطع صعودي (MACD خط يتجاوز خط الإشارة)
-      - ويكون RSI أقل من 30 (إشارة تشبع بيعي)
-      - ويكون السعر قريباً من الفرقة السفلية في Bollinger Bands
-    في هذه الحالة يتم اعتبارها إشارة شراء.
-    يتم تحديد وقف الخسارة عند الفرقة السفلية والهدف عند الفرقة العلوية من Bollinger Bands.
-    """
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 2")
         return None
-
-    # نستخدم بيانات اليوم على فريم 15 دقيقة (آخر 96 شمعة)
     if len(df) >= 96:
         day_df = df.tail(96)
     else:
         day_df = df
-
-    # حساب MACD
     macd_df = calculate_MACD(day_df.copy())
     macd_latest = macd_df.iloc[-1]
-    # حساب Bollinger Bands على فترة 20 شمعة
     lower_bb, middle_bb, upper_bb = calculate_Bollinger_Bands(day_df.copy(), period=20, std_multiplier=2)
-    # حساب RSI
     rsi_val = calculate_rsi(day_df.copy(), period=14).iloc[-1]
     current_price = day_df['close'].iloc[-1]
-
     logger.info(f"{symbol} - MACD: {macd_latest['MACD']:.4f}, Signal: {macd_latest['MACD_signal']:.4f}, RSI: {rsi_val:.2f}")
-    # شرط تقاطع MACD الصعودي: MACD > Signal (في آخر شمعة)
     if macd_latest['MACD'] <= macd_latest['MACD_signal']:
         logger.info(f"تجاهل {symbol} - MACD لم يتقاطع صعودياً")
         return None
-    # شرط RSI منخفض (إشارة تشبع بيعي)
     if rsi_val > 30:
         logger.info(f"تجاهل {symbol} - RSI غير مناسب (RSI = {rsi_val:.2f})")
         return None
-    # إذا كان السعر قريباً من الفرقة السفلية (مثلاً ضمن 5% من الفرقة السفلية)
     if current_price > lower_bb.iloc[-1] * 1.05:
         logger.info(f"تجاهل {symbol} - السعر ليس قريباً من الفرقة السفلية لـ Bollinger Bands")
         return None
-
-    # في حالة تحقق الشروط، نعتبرها إشارة شراء
-    # تحديد وقف الخسارة عند الفرقة السفلية والهدف عند الفرقة العلوية
     stop_loss = lower_bb.iloc[-1]
     target = upper_bb.iloc[-1]
-    # نضع "ثقة" الاستراتيجية بناءً على الفرق بين MACD وخط الإشارة
     confidence = round((macd_latest['MACD'] - macd_latest['MACD_signal']) * 100, 2)
     rounded_price = float(format(current_price, '.4f'))
     rounded_target = float(format(target, '.4f'))
@@ -431,19 +404,11 @@ def generate_signal_strategy2(df, symbol):
         'strategy': 'Strategy2'
     }
 
-# ---------------------- دالة اختيار الاستراتيجية ----------------------
 def generate_trade_signal(df, symbol):
-    """
-    تحاول الدالة تطبيق الاستراتيجيتين وتعيد الإشارة ذات الثقة الأعلى إذا كانت موجودة.
-    """
     signal1 = generate_signal_strategy1(df.copy(), symbol)
     signal2 = generate_signal_strategy2(df.copy(), symbol)
-    # إذا كانت كلتا الاستراتيجيتين عادتا بإشارة، نختار التي تحمل "ثقة" أعلى
     if signal1 and signal2:
-        if signal1['confidence'] >= signal2['confidence']:
-            return signal1
-        else:
-            return signal2
+        return signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
     elif signal1:
         return signal1
     elif signal2:
@@ -451,7 +416,7 @@ def generate_trade_signal(df, symbol):
     else:
         return None
 
-# ---------------------- دوال إرسال التنبيهات ----------------------
+# ---------------------- دوال إرسال التنبيهات والتقارير ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
@@ -544,7 +509,6 @@ def send_report(target_chat_id):
         avg_profit_pct = sum(profit_percentages)/len(profit_percentages) if profit_percentages else 0
         avg_loss_pct = sum(loss_percentages)/len(loss_percentages) if loss_percentages else 0
         net_profit = total_profit + total_loss
-
         report_message = (
             f"📊 **تقرير الأداء الشامل**\n\n"
             f"✅ عدد التوصيات الناجحة: {success_count}\n"
@@ -564,7 +528,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات ----------------------
+# ---------------------- دوال تتبع الإشارات ----------------------
 def track_signals():
     logger.info("بدء خدمة تتبع الإشارات...")
     while True:
@@ -635,7 +599,7 @@ def track_signals():
             conn.rollback()
             time.sleep(60)
 
-# ---------------------- فحص الأزواج بشكل دوري ----------------------
+# ---------------------- دالة تحليل السوق ----------------------
 def analyze_market():
     logger.info("بدء فحص الأزواج الآن...")
     check_db_connection()
@@ -646,7 +610,7 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    # تم إزالة شرط اختبار اتجاه البيتكوين؛ نعتبر الاستراتيجيتين مستقلتين.
+    # إزالة شرط اختبار البيتكوين؛ نعتبره دائماً True.
     btc_trend = True
 
     btc_dominance, eth_dominance = get_market_dominance()
@@ -658,6 +622,7 @@ def analyze_market():
     if not symbols:
         logger.warning("لا توجد أزواج في الملف!")
         return
+
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
@@ -669,11 +634,10 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            # نحاول تطبيق الاستراتيجيتين ونختار الإشارة إن وُجدت.
             signal = generate_trade_signal(df, symbol)
             if not signal:
                 continue
-            # يمكننا أيضًا فحص مؤشرات إضافية (مثل Ichimoku وRSI) لتأكيد الإشارة
+            # يمكن التأكيد باستخدام مؤشرات إضافية (Ichimoku وRSI)
             ichimoku_df = calculate_ichimoku(df.copy())
             last_row = ichimoku_df.iloc[-1]
             if last_row['close'] <= max(last_row['senkou_span_a'], last_row['senkou_span_b']):
@@ -713,21 +677,6 @@ def analyze_market():
             conn.rollback()
             continue
     logger.info("انتهى فحص جميع الأزواج")
-
-def generate_trade_signal(df, symbol):
-    """
-    تحاول هذه الدالة تطبيق الاستراتيجيتين وتعيد الإشارة ذات الثقة الأعلى إن وُجدت.
-    """
-    signal1 = generate_signal_strategy1(df.copy(), symbol)
-    signal2 = generate_signal_strategy2(df.copy(), symbol)
-    if signal1 and signal2:
-        return signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
-    elif signal1:
-        return signal1
-    elif signal2:
-        return signal2
-    else:
-        return None
 
 def test_telegram():
     try:
