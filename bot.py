@@ -138,7 +138,7 @@ def webhook():
 
 def set_telegram_webhook():
     # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"
+    webhook_url = "https://your-app.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -258,158 +258,200 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
-# ---------------------- دوال حساب القناة السعرية (باستخدام بيانات يوم واحد على فريم 15 دقيقة) ----------------------
-def calculate_price_channel(df_day):
+# ---------------------- دوال إضافية للاستراتيجية الثانية (MACD & Bollinger Bands) ----------------------
+def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
     """
-    حساب القناة السعرية باستخدام بيانات اليوم:
-      - الدعم: أدنى سعر خلال الفترة.
-      - المقاومة: أعلى سعر خلال الفترة.
+    حساب MACD:
+      MACD = EMA(short_period) - EMA(long_period)
+      Signal = EMA(MACD, signal_period)
+      Histogram = MACD - Signal
     """
-    lower_channel = df_day['low'].min()
-    upper_channel = df_day['high'].max()
-    return lower_channel, upper_channel
+    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
+    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
+    df['MACD'] = df['ema_short'] - df['ema_long']
+    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
+    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+    return df[['MACD', 'MACD_signal', 'MACD_hist']]
 
-# ---------------------- تحسين نموذج التنبؤ وإدارة المخاطر ----------------------
-def generate_signal_improved(df, symbol):
+def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
     """
-    إنشاء إشارة تداول محسنة باستخدام نموذج تجميعي مع ميزات إضافية،
-    والاعتماد على القناة السعرية (Donchian Channel) لتحديد الهدف ووقف الخسارة
-    باستخدام طريقة إحصائية تعتمد على الانحراف المعياري لعوائد اليوم.
-    يتم حساب بيانات اليوم من بيانات فريم 15 دقيقة (آخر 96 شمعة).
-    إذا كان السعر الحالي ضمن النطاق بين الدعم والمقاومة،
-    يتم تعيين:
-      - الهدف = السعر الحالي + (2 × (std_return × السعر الحالي))
-      - وقف الخسارة = السعر الحالي - (1 × (std_return × السعر الحالي))
+    حساب Bollinger Bands:
+      Middle Band = SMA(period)
+      Upper Band = Middle Band + (std_multiplier × std)
+      Lower Band = Middle Band - (std_multiplier × std)
     """
-    logger.info(f"بدء توليد إشارة تداول محسنة للزوج: {symbol}")
-    try:
-        df = df.dropna().reset_index(drop=True)
-        if len(df) < 100:
-            logger.warning(f"بيانات {symbol} غير كافية للنموذج المحسن")
-            return None
+    sma = df['close'].rolling(window=period).mean()
+    std = df['close'].rolling(window=period).std()
+    upper_band = sma + std_multiplier * std
+    lower_band = sma - std_multiplier * std
+    return lower_band, sma, upper_band
 
-        # حساب الميزات الإضافية (كما في النسخة السابقة)
-        df['prev_close'] = df['close'].shift(1)
-        df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
-        df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
-        df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
-        df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
-        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
-        df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
-        df['rsi_feature'] = calculate_rsi(df).shift(1)
-        df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
-        df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
-        df['momentum'] = df['close'] - df['close'].shift(10)
-
-        features = ['prev_close', 'sma10', 'sma20', 'sma50',
-                    'ema10', 'ema20', 'ema50', 'rsi_feature',
-                    'atr_feature', 'volatility', 'momentum']
-        df_features = df.dropna().reset_index(drop=True)
-        if len(df_features) < 50:
-            logger.warning(f"بيانات الميزات لـ {symbol} غير كافية")
-            return None
-
-        X = df_features[features]
-        y = df_features['close']
-
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-        scaler = StandardScaler()
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
-
-        from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
-        from sklearn.linear_model import Ridge
-        from xgboost import XGBRegressor
-
-        model1 = RandomForestRegressor(n_estimators=200, random_state=42)
-        model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
-        model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
-        model4 = Ridge()
-        model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
-
-        voting_reg = VotingRegressor([
-            ('rf', model1),
-            ('gbr', model2),
-            ('etr', model3),
-            ('ridge', model4),
-            ('xgb', model5)
-        ])
-
-        voting_reg.fit(X_train_scaled, y_train)
-        score = voting_reg.score(X_test_scaled, y_test)
-        confidence = round(score * 100, 2)
-        logger.info(f"ثقة النموذج المحسن لـ {symbol}: {confidence}%")
-
-        current_price = df['close'].iloc[-1]
-
-        # حساب بيانات اليوم على فريم 15 دقيقة (نستخدم آخر 96 شمعة)
-        if len(df) >= 96:
-            day_df = df.tail(96)
-        else:
-            day_df = df
-
-        # حساب القناة السعرية باستخدام بيانات اليوم (يمكن استخدامها للتحقق من النطاق)
-        lower_channel, upper_channel = calculate_price_channel(day_df)
-        if not (lower_channel < current_price < upper_channel):
-            logger.info(f"تجاهل {symbol} - السعر الحالي ({current_price}) خارج نطاق القناة السعرية (من {lower_channel} إلى {upper_channel})")
-            return None
-
-        # حساب الانحراف المعياري لعوائد اليوم
-        returns = day_df['close'].pct_change().dropna()
-        std_returns = returns.std()
-        logger.info(f"الانحراف المعياري لعوائد اليوم للزوج {symbol}: {std_returns:.4f}")
-
-        # تحديد الهدف ووقف الخسارة بطريقة إحصائية:
-        # الهدف = السعر الحالي + (2 × (std_returns × السعر الحالي))
-        # وقف الخسارة = السعر الحالي - (1 × (std_returns × السعر الحالي))
-        target = current_price + 2 * std_returns * current_price
-        stop_loss = current_price - 1 * std_returns * current_price
-
-        decimals = 8 if current_price < 1 else 4
-        rounded_price = float(format(current_price, f'.{decimals}f'))
-        rounded_target = float(format(target, f'.{decimals}f'))
-        rounded_stop_loss = float(format(stop_loss, f'.{decimals}f'))
-
-        signal = {
-            'symbol': symbol,
-            'price': rounded_price,
-            'target': rounded_target,
-            'stop_loss': rounded_stop_loss,
-            'confidence': confidence,
-            'trade_value': TRADE_VALUE
-        }
-        logger.info(f"تم توليد الإشارة المحسنة للزوج {symbol}: {signal}")
-        return signal
-
-    except Exception as e:
-        logger.error(f"خطأ في توليد إشارة محسن للزوج {symbol}: {e}")
+# ---------------------- استراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
+def generate_signal_strategy1(df, symbol):
+    """
+    تعتمد الاستراتيجية الأولى على نموذج تجميعي لتوليد إشارة تداول،
+    وتحديد الهدف ووقف الخسارة باستخدام قناة دونتشين على بيانات يوم واحد (فريم 15 دقيقة، آخر 96 شمعة).
+    """
+    # (تم تطبيق نفس الأسلوب كما في النسخة السابقة)
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 100:
+        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
         return None
 
-def get_market_dominance():
-    try:
-        url = "https://api.coingecko.com/api/v3/global"
-        response = requests.get(url, timeout=10)
-        if response.status_code == 200:
-            data = response.json().get("data", {})
-            market_cap_percentage = data.get("market_cap_percentage", {})
-            btc_dominance = market_cap_percentage.get("btc")
-            eth_dominance = market_cap_percentage.get("eth")
-            logger.info(f"BTC Dominance: {btc_dominance}%, ETH Dominance: {eth_dominance}%")
-            return btc_dominance, eth_dominance
+    # حساب الميزات الأساسية (يمكنك تعديلها)
+    df['prev_close'] = df['close'].shift(1)
+    df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
+    df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
+    df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
+    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
+    df['rsi_feature'] = calculate_rsi(df).shift(1)
+    df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
+    df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
+    df['momentum'] = df['close'] - df['close'].shift(10)
+    features = ['prev_close', 'sma10', 'sma20', 'sma50', 'ema10', 'ema20', 'ema50',
+                'rsi_feature', 'atr_feature', 'volatility', 'momentum']
+    df_features = df.dropna().reset_index(drop=True)
+    if len(df_features) < 50:
+        logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
+        return None
+
+    X = df_features[features]
+    y = df_features['close']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
+    from sklearn.linear_model import Ridge
+    from xgboost import XGBRegressor
+    model1 = RandomForestRegressor(n_estimators=200, random_state=42)
+    model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
+    model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
+    model4 = Ridge()
+    model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
+    voting_reg = VotingRegressor([
+        ('rf', model1),
+        ('gbr', model2),
+        ('etr', model3),
+        ('ridge', model4),
+        ('xgb', model5)
+    ])
+    voting_reg.fit(X_train_scaled, y_train)
+    score = voting_reg.score(X_test_scaled, y_test)
+    confidence = round(score * 100, 2)
+    logger.info(f"ثقة الاستراتيجية 1 لـ {symbol}: {confidence}%")
+    current_price = df['close'].iloc[-1]
+    # حساب قناة دونتشين باستخدام بيانات يوم واحد على فريم 15 دقيقة (آخر 96 شمعة)
+    if len(df) >= 96:
+        day_df = df.tail(96)
+    else:
+        day_df = df
+    lower_channel, upper_channel = calculate_price_channel(day_df)
+    if not (lower_channel < current_price < upper_channel):
+        logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة دونتشين")
+        return None
+    # هنا يتم استخدام قناة دونتشين لتحديد الهدف ووقف الخسارة
+    stop_loss = lower_channel
+    target = upper_channel
+    rounded_price = float(format(current_price, '.4f'))
+    rounded_target = float(format(target, '.4f'))
+    rounded_stop_loss = float(format(stop_loss, '.4f'))
+    return {
+        'symbol': symbol,
+        'price': rounded_price,
+        'target': rounded_target,
+        'stop_loss': rounded_stop_loss,
+        'confidence': confidence,
+        'trade_value': TRADE_VALUE,
+        'strategy': 'Strategy1'
+    }
+
+# ---------------------- استراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
+def generate_signal_strategy2(df, symbol):
+    """
+    تعتمد الاستراتيجية الثانية على مؤشرات MACD وBollinger Bands وRSI:
+      - تُحسب MACD بحيث إذا حدث تقاطع صعودي (MACD خط يتجاوز خط الإشارة)
+      - ويكون RSI أقل من 30 (إشارة تشبع بيعي)
+      - ويكون السعر قريباً من الفرقة السفلية في Bollinger Bands
+    في هذه الحالة يتم اعتبارها إشارة شراء.
+    يتم تحديد وقف الخسارة عند الفرقة السفلية والهدف عند الفرقة العلوية من Bollinger Bands.
+    """
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 50:
+        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 2")
+        return None
+
+    # نستخدم بيانات اليوم على فريم 15 دقيقة (آخر 96 شمعة)
+    if len(df) >= 96:
+        day_df = df.tail(96)
+    else:
+        day_df = df
+
+    # حساب MACD
+    macd_df = calculate_MACD(day_df.copy())
+    macd_latest = macd_df.iloc[-1]
+    # حساب Bollinger Bands على فترة 20 شمعة
+    lower_bb, middle_bb, upper_bb = calculate_Bollinger_Bands(day_df.copy(), period=20, std_multiplier=2)
+    # حساب RSI
+    rsi_val = calculate_rsi(day_df.copy(), period=14).iloc[-1]
+    current_price = day_df['close'].iloc[-1]
+
+    logger.info(f"{symbol} - MACD: {macd_latest['MACD']:.4f}, Signal: {macd_latest['MACD_signal']:.4f}, RSI: {rsi_val:.2f}")
+    # شرط تقاطع MACD الصعودي: MACD > Signal (في آخر شمعة)
+    if macd_latest['MACD'] <= macd_latest['MACD_signal']:
+        logger.info(f"تجاهل {symbol} - MACD لم يتقاطع صعودياً")
+        return None
+    # شرط RSI منخفض (إشارة تشبع بيعي)
+    if rsi_val > 30:
+        logger.info(f"تجاهل {symbol} - RSI غير مناسب (RSI = {rsi_val:.2f})")
+        return None
+    # إذا كان السعر قريباً من الفرقة السفلية (مثلاً ضمن 5% من الفرقة السفلية)
+    if current_price > lower_bb.iloc[-1] * 1.05:
+        logger.info(f"تجاهل {symbol} - السعر ليس قريباً من الفرقة السفلية لـ Bollinger Bands")
+        return None
+
+    # في حالة تحقق الشروط، نعتبرها إشارة شراء
+    # تحديد وقف الخسارة عند الفرقة السفلية والهدف عند الفرقة العلوية
+    stop_loss = lower_bb.iloc[-1]
+    target = upper_bb.iloc[-1]
+    # نضع "ثقة" الاستراتيجية بناءً على الفرق بين MACD وخط الإشارة
+    confidence = round((macd_latest['MACD'] - macd_latest['MACD_signal']) * 100, 2)
+    rounded_price = float(format(current_price, '.4f'))
+    rounded_target = float(format(target, '.4f'))
+    rounded_stop_loss = float(format(stop_loss, '.4f'))
+    return {
+        'symbol': symbol,
+        'price': rounded_price,
+        'target': rounded_target,
+        'stop_loss': rounded_stop_loss,
+        'confidence': confidence,
+        'trade_value': TRADE_VALUE,
+        'strategy': 'Strategy2'
+    }
+
+# ---------------------- دالة اختيار الاستراتيجية ----------------------
+def generate_trade_signal(df, symbol):
+    """
+    تحاول الدالة تطبيق الاستراتيجيتين وتعيد الإشارة ذات الثقة الأعلى إذا كانت موجودة.
+    """
+    signal1 = generate_signal_strategy1(df.copy(), symbol)
+    signal2 = generate_signal_strategy2(df.copy(), symbol)
+    # إذا كانت كلتا الاستراتيجيتين عادتا بإشارة، نختار التي تحمل "ثقة" أعلى
+    if signal1 and signal2:
+        if signal1['confidence'] >= signal2['confidence']:
+            return signal1
         else:
-            logger.error(f"خطأ في جلب نسب السيطرة: {response.status_code} {response.text}")
-            return None, None
-    except Exception as e:
-        logger.error(f"خطأ في get_market_dominance: {e}")
-        return None, None
+            return signal2
+    elif signal1:
+        return signal1
+    elif signal2:
+        return signal2
+    else:
+        return None
 
-# ---------------------- فحص اتجاه BTC ----------------------
-# تمت إزالة شرط اختبار اتجاه البيتكوين (BTC) من النظام، إذ لم يعد هناك شرط لصعود البيتكوين.
-def check_btc_trend():
-    # تم الاحتفاظ بهذه الدالة للإبلاغ فقط (يمكن إرجاع True دائماً)
-    return True
-
-# ---------------------- إرسال التنبيهات عبر Telegram ----------------------
+# ---------------------- دوال إرسال التنبيهات ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
@@ -420,7 +462,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📊 ثقة النموذج: {signal['confidence']}%\n"
+            f"📊 ثقة الاستراتيجية ({signal['strategy']}): {signal['confidence']}%\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -604,7 +646,7 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    # تم إزالة شرط اختبار اتجاه البيتكوين (BTC)؛ نعتبره دائماً True.
+    # تم إزالة شرط اختبار اتجاه البيتكوين؛ نعتبر الاستراتيجيتين مستقلتين.
     btc_trend = True
 
     btc_dominance, eth_dominance = get_market_dominance()
@@ -627,9 +669,11 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            signal = generate_signal_improved(df, symbol)
+            # نحاول تطبيق الاستراتيجيتين ونختار الإشارة إن وُجدت.
+            signal = generate_trade_signal(df, symbol)
             if not signal:
                 continue
+            # يمكننا أيضًا فحص مؤشرات إضافية (مثل Ichimoku وRSI) لتأكيد الإشارة
             ichimoku_df = calculate_ichimoku(df.copy())
             last_row = ichimoku_df.iloc[-1]
             if last_row['close'] <= max(last_row['senkou_span_a'], last_row['senkou_span_b']):
@@ -669,6 +713,21 @@ def analyze_market():
             conn.rollback()
             continue
     logger.info("انتهى فحص جميع الأزواج")
+
+def generate_trade_signal(df, symbol):
+    """
+    تحاول هذه الدالة تطبيق الاستراتيجيتين وتعيد الإشارة ذات الثقة الأعلى إن وُجدت.
+    """
+    signal1 = generate_signal_strategy1(df.copy(), symbol)
+    signal2 = generate_signal_strategy2(df.copy(), symbol)
+    if signal1 and signal2:
+        return signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
+    elif signal1:
+        return signal1
+    elif signal2:
+        return signal2
+    else:
+        return None
 
 def test_telegram():
     try:
