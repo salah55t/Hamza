@@ -249,13 +249,25 @@ def calculate_atr_series(df, period=14):
     atr_series = true_range.rolling(window=period).mean()
     return atr_series
 
+# ---------------------- دوال إضافية للاستراتيجية 2 (MACD, Bollinger Bands) ----------------------
+def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
+    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
+    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
+    df['MACD'] = df['ema_short'] - df['ema_long']
+    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
+    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
+    return df[['MACD', 'MACD_signal', 'MACD_hist']]
+
+def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
+    sma = df['close'].rolling(window=period).mean()
+    std = df['close'].rolling(window=period).std()
+    upper_band = sma + std_multiplier * std
+    lower_band = sma - std_multiplier * std
+    return lower_band, sma, upper_band
+
 # ---------------------- دوال حساب القناة السعرية ----------------------
 def calculate_price_channel(df_day):
-    """
-    حساب القناة السعرية باستخدام بيانات اليوم على فريم 15 دقيقة:
-      - الدعم هو أدنى سعر خلال الفترة.
-      - المقاومة هو أعلى سعر خلال الفترة.
-    """
+    logger.info("حساب القناة السعرية باستخدام بيانات اليوم على فريم 15 دقيقة")
     lower_channel = df_day['low'].min()
     upper_channel = df_day['high'].max()
     return lower_channel, upper_channel
@@ -319,8 +331,7 @@ def generate_signal_strategy1(df, symbol):
     if not (lower_channel < current_price < upper_channel):
         logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة دونتشين")
         return None
-    # تعديل وقف الخسارة: يُخفض بمقدار 0.2% من السعر الحالي
-    margin = current_price * 0.002
+    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
     stop_loss = lower_channel - margin
     target = upper_channel
     rounded_price = float(format(current_price, '.4f'))
@@ -363,7 +374,7 @@ def generate_signal_strategy2(df, symbol):
         return None
     stop_loss = lower_bb.iloc[-1]
     target = upper_bb.iloc[-1]
-    margin = current_price * 0.002
+    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
     stop_loss_adjusted = stop_loss - margin
     confidence = round((macd_latest['MACD'] - macd_latest['MACD_signal']) * 100, 2)
     rounded_price = float(format(current_price, '.4f'))
@@ -604,7 +615,7 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    btc_trend = True  # تم إزالة شرط اختبار البيتكوين
+    btc_trend = True  # إزالة شرط اختبار البيتكوين؛ نعتبره دائماً True.
     btc_dominance, eth_dominance = get_market_dominance()
     if btc_dominance is None or eth_dominance is None:
         logger.warning("لم يتم جلب نسب السيطرة؛ سيتم تعيينها كـ 0.0")
