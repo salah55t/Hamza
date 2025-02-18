@@ -137,8 +137,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    # تأكد من تعديل الرابط ليناسب عنوان التطبيق المنشور (مثلاً على Render)
-    webhook_url = "https://your-app.onrender.com/webhook"
+    webhook_url = "https://hamza-6b3u.onrender.com/webhook"  # عدل حسب عنوان التطبيق
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -162,9 +161,6 @@ def get_crypto_symbols():
         return []
 
 def fetch_historical_data(symbol, interval='5m', days=2):
-    """
-    جلب البيانات التاريخية لمدة يومين على فريم 5 دقائق مع استخدام التخزين المؤقت لمدة 5 دقائق.
-    """
     cache_duration = 300  # 5 دقائق
     current_time = time.time()
     if symbol in historical_data_cache:
@@ -172,7 +168,6 @@ def fetch_historical_data(symbol, interval='5m', days=2):
         if current_time - cached_timestamp < cache_duration:
             logger.info(f"استخدام البيانات المؤقتة للزوج {symbol}")
             return cached_df
-
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -191,9 +186,6 @@ def fetch_historical_data(symbol, interval='5m', days=2):
         return None
 
 def fetch_recent_volume(symbol):
-    """
-    جلب حجم السيولة في آخر 15 دقيقة مع استخدام تخزين مؤقت لمدة 30 ثانية.
-    """
     cache_duration = 30  # 30 ثانية
     current_time = time.time()
     if symbol in volume_data_cache:
@@ -201,7 +193,6 @@ def fetch_recent_volume(symbol):
         if current_time - cached_timestamp < cache_duration:
             logger.info(f"استخدام حجم السيولة المؤقت للزوج {symbol}")
             return cached_volume
-
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
@@ -219,17 +210,17 @@ def calculate_volatility(df):
     return vol
 
 def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
-    logger.info("بدء حساب مؤشر الاشموكو")
+    logger.info("بدء حساب مؤشر (Ichimoku)")
     df['tenkan_sen'] = (df['high'].rolling(window=tenkan).max() + df['low'].rolling(window=tenkan).min()) / 2
     df['kijun_sen'] = (df['high'].rolling(window=kijun).max() + df['low'].rolling(window=kijun).min()) / 2
     df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(displacement)
     df['senkou_span_b'] = ((df['high'].rolling(window=senkou_b).max() + df['low'].rolling(window=senkou_b).min()) / 2).shift(displacement)
     df['chikou_span'] = df['close'].shift(-displacement)
-    logger.info("انتهى حساب مؤشر الاشموكو")
+    logger.info("انتهى حساب مؤشر (Ichimoku)")
     return df
 
 def calculate_rsi(df, period=14):
-    logger.info("بدء حساب مؤشر RSI")
+    logger.info("بدء حساب مؤشر (RSI)")
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -238,7 +229,7 @@ def calculate_rsi(df, period=14):
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     last_rsi = rsi.iloc[-1]
-    logger.info(f"تم حساب RSI: {last_rsi:.2f}")
+    logger.info(f"تم حساب مؤشر (RSI): {last_rsi:.2f}")
     return rsi
 
 def calculate_atr(df, period=14):
@@ -247,7 +238,7 @@ def calculate_atr(df, period=14):
     low_close = (df['low'] - df['close'].shift(1)).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     atr = true_range.rolling(window=period).mean().iloc[-1]
-    logger.info(f"تم حساب ATR: {atr:.8f}")
+    logger.info(f"تم حساب (ATR): {atr:.8f}")
     return atr
 
 def calculate_atr_series(df, period=14):
@@ -269,28 +260,13 @@ def calculate_price_channel(df_day):
     upper_channel = df_day['high'].max()
     return lower_channel, upper_channel
 
-# ---------------------- دوال إضافية للاستراتيجية 2 (MACD, Bollinger Bands) ----------------------
-def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
-    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
-    df['MACD'] = df['ema_short'] - df['ema_long']
-    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
-    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
-    return df[['MACD', 'MACD_signal', 'MACD_hist']]
-
-def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
-    sma = df['close'].rolling(window=period).mean()
-    std = df['close'].rolling(window=period).std()
-    upper_band = sma + std_multiplier * std
-    lower_band = sma - std_multiplier * std
-    return lower_band, sma, upper_band
-
 # ---------------------- الاستراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
 def generate_signal_strategy1(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 100:
         logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
         return None
+
     df['prev_close'] = df['close'].shift(1)
     df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
     df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
@@ -308,6 +284,7 @@ def generate_signal_strategy1(df, symbol):
     if len(df_features) < 50:
         logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
         return None
+
     X = df_features[features]
     y = df_features['close']
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
@@ -342,7 +319,9 @@ def generate_signal_strategy1(df, symbol):
     if not (lower_channel < current_price < upper_channel):
         logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة دونتشين")
         return None
-    stop_loss = lower_channel
+    # تعديل وقف الخسارة: يُخفض بمقدار 0.2% من السعر الحالي
+    margin = current_price * 0.002
+    stop_loss = lower_channel - margin
     target = upper_channel
     rounded_price = float(format(current_price, '.4f'))
     rounded_target = float(format(target, '.4f'))
@@ -384,10 +363,12 @@ def generate_signal_strategy2(df, symbol):
         return None
     stop_loss = lower_bb.iloc[-1]
     target = upper_bb.iloc[-1]
+    margin = current_price * 0.002
+    stop_loss_adjusted = stop_loss - margin
     confidence = round((macd_latest['MACD'] - macd_latest['MACD_signal']) * 100, 2)
     rounded_price = float(format(current_price, '.4f'))
     rounded_target = float(format(target, '.4f'))
-    rounded_stop_loss = float(format(stop_loss, '.4f'))
+    rounded_stop_loss = float(format(stop_loss_adjusted, '.4f'))
     return {
         'symbol': symbol,
         'price': rounded_price,
@@ -440,7 +421,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📊 ثقة الاستراتيجية ({signal['strategy']}): {signal['confidence']}%\n"
+            f"📊 الاستراتيجية: ({signal['strategy']}) - ثقة: {signal['confidence']}%\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -623,9 +604,7 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    # إزالة شرط اختبار البيتكوين؛ نعتبره دائماً True.
-    btc_trend = True
-
+    btc_trend = True  # تم إزالة شرط اختبار البيتكوين
     btc_dominance, eth_dominance = get_market_dominance()
     if btc_dominance is None or eth_dominance is None:
         logger.warning("لم يتم جلب نسب السيطرة؛ سيتم تعيينها كـ 0.0")
@@ -653,15 +632,15 @@ def analyze_market():
             ichimoku_df = calculate_ichimoku(df.copy())
             last_row = ichimoku_df.iloc[-1]
             if last_row['close'] <= max(last_row['senkou_span_a'], last_row['senkou_span_b']):
-                logger.info(f"تجاهل {symbol} - السعر ليس فوق السحابة وفق مؤشر الاشموكو")
+                logger.info(f"تجاهل {symbol} - السعر ليس فوق السحابة وفق مؤشر (Ichimoku)")
                 continue
             if last_row['tenkan_sen'] <= last_row['kijun_sen']:
-                logger.info(f"تجاهل {symbol} - تقاطع مؤشر الاشموكو غير صعودي")
+                logger.info(f"تجاهل {symbol} - تقاطع مؤشر (Ichimoku) غير صعودي")
                 continue
             rsi_series = calculate_rsi(df)
             last_rsi = rsi_series.iloc[-1]
             if last_rsi > 30:
-                logger.info(f"تجاهل {symbol} - شرط RSI غير مستوفى (RSI = {last_rsi:.2f})")
+                logger.info(f"تجاهل {symbol} - شرط (RSI) غير مستوفى (RSI = {last_rsi:.2f})")
                 continue
             logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
             send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
