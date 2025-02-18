@@ -137,7 +137,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-6b3u.onrender.com/webhook"  # عدل حسب عنوان التطبيق
+    webhook_url = "https://your-app.onrender.com/webhook"  # عدل حسب عنوان التطبيق
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -511,8 +511,8 @@ def send_report(target_chat_id):
                 stop_loss_count += 1
                 loss_percentages.append(loss_pct)
                 total_loss += loss_dollar
-        avg_profit_pct = sum(profit_percentages)/len(profit_percentages) if profit_percentages else 0
-        avg_loss_pct = sum(loss_percentages)/len(loss_percentages) if loss_percentages else 0
+        avg_profit_pct = sum(profit_percentages) / len(profit_percentages) if profit_percentages else 0
+        avg_loss_pct = sum(loss_percentages) / len(loss_percentages) if loss_percentages else 0
         net_profit = total_profit + total_loss
         report_message = (
             f"📊 **تقرير الأداء الشامل**\n\n"
