@@ -83,14 +83,14 @@ def check_db_connection():
             logger.error(f"فشل إعادة الاتصال: {ex}")
             raise
 
-# ---------------------- إعداد عميل Binance ----------------------
+# ---------------------- إعداد عميل (Binance) ----------------------
 client = Client(api_key, api_secret)
 
 # ---------------------- آلية التخزين المؤقت ----------------------
 historical_data_cache = {}   # يخزن: { symbol: (timestamp, dataframe) }
 volume_data_cache = {}       # يخزن: { symbol: (timestamp, volume) }
 
-# ---------------------- استخدام WebSocket لتحديث بيانات التيكر ----------------------
+# ---------------------- استخدام (WebSocket) لتحديث بيانات التيكر ----------------------
 ticker_data = {}
 
 def handle_ticker_message(msg):
@@ -116,7 +116,7 @@ def run_ticker_socket_manager():
     except Exception as e:
         logger.error(f"خطأ في تشغيل WebSocket: {e}")
 
-# ---------------------- إعداد تطبيق Flask ----------------------
+# ---------------------- إعداد تطبيق (Flask) ----------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -137,7 +137,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://your-app.onrender.com/webhook"  # عدل حسب عنوان التطبيق
+    webhook_url = "https://hamza-1.onrender.com/webhook"  # عدل حسب عنوان التطبيق
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -272,81 +272,6 @@ def calculate_price_channel(df_day):
     upper_channel = df_day['high'].max()
     return lower_channel, upper_channel
 
-# ---------------------- الاستراتيجية 1: نموذج تجميعي + قناة دونتشين ----------------------
-def generate_signal_strategy1(df, symbol):
-    df = df.dropna().reset_index(drop=True)
-    if len(df) < 100:
-        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
-        return None
-
-    df['prev_close'] = df['close'].shift(1)
-    df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
-    df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
-    df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
-    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
-    df['rsi_feature'] = calculate_rsi(df).shift(1)
-    df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
-    df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
-    df['momentum'] = df['close'] - df['close'].shift(10)
-    features = ['prev_close', 'sma10', 'sma20', 'sma50', 'ema10', 'ema20', 'ema50',
-                'rsi_feature', 'atr_feature', 'volatility', 'momentum']
-    df_features = df.dropna().reset_index(drop=True)
-    if len(df_features) < 50:
-        logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
-        return None
-
-    X = df_features[features]
-    y = df_features['close']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
-    from sklearn.linear_model import Ridge
-    from xgboost import XGBRegressor
-    model1 = RandomForestRegressor(n_estimators=200, random_state=42)
-    model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
-    model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
-    model4 = Ridge()
-    model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
-    voting_reg = VotingRegressor([
-        ('rf', model1),
-        ('gbr', model2),
-        ('etr', model3),
-        ('ridge', model4),
-        ('xgb', model5)
-    ])
-    voting_reg.fit(X_train_scaled, y_train)
-    score = voting_reg.score(X_test_scaled, y_test)
-    confidence = round(score * 100, 2)
-    logger.info(f"ثقة الاستراتيجية 1 لـ {symbol}: {confidence}%")
-    current_price = df['close'].iloc[-1]
-    if len(df) >= 96:
-        day_df = df.tail(96)
-    else:
-        day_df = df
-    lower_channel, upper_channel = calculate_price_channel(day_df)
-    if not (lower_channel < current_price < upper_channel):
-        logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة دونتشين")
-        return None
-    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
-    stop_loss = lower_channel - margin
-    target = upper_channel
-    rounded_price = float(format(current_price, '.4f'))
-    rounded_target = float(format(target, '.4f'))
-    rounded_stop_loss = float(format(stop_loss, '.4f'))
-    return {
-        'symbol': symbol,
-        'price': rounded_price,
-        'target': rounded_target,
-        'stop_loss': rounded_stop_loss,
-        'confidence': confidence,
-        'trade_value': TRADE_VALUE,
-        'strategy': 'Strategy1'
-    }
-
 # ---------------------- الاستراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
 def generate_signal_strategy2(df, symbol):
     df = df.dropna().reset_index(drop=True)
@@ -370,7 +295,7 @@ def generate_signal_strategy2(df, symbol):
         logger.info(f"تجاهل {symbol} - RSI غير مناسب (RSI = {rsi_val:.2f})")
         return None
     if current_price > lower_bb.iloc[-1] * 1.05:
-        logger.info(f"تجاهل {symbol} - السعر ليس قريباً من الفرقة السفلية لـ Bollinger Bands")
+        logger.info(f"تجاهل {symbol} - السعر ليس قريباً من الفرقة السفلية لـ (Bollinger Bands)")
         return None
     stop_loss = lower_bb.iloc[-1]
     target = upper_bb.iloc[-1]
@@ -391,16 +316,8 @@ def generate_signal_strategy2(df, symbol):
     }
 
 def generate_trade_signal(df, symbol):
-    signal1 = generate_signal_strategy1(df.copy(), symbol)
-    signal2 = generate_signal_strategy2(df.copy(), symbol)
-    if signal1 and signal2:
-        return signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
-    elif signal1:
-        return signal1
-    elif signal2:
-        return signal2
-    else:
-        return None
+    # نعتمد على الاستراتيجية الثانية فقط
+    return generate_signal_strategy2(df.copy(), symbol)
 
 # ---------------------- دالة الحصول على نسب السيطرة على السوق ----------------------
 def get_market_dominance():
