@@ -9,7 +9,7 @@ from flask import Flask, request
 from threading import Thread
 import logging
 import requests
-import json  # لاستخدام reply_markup في تنبيهات Telegram
+import json  # لاستخدام reply_markup في تنبيهات (Telegram)
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from decouple import config
@@ -160,7 +160,8 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='5m', days=2):
+# استخدام فريم (15m) لتداول اليوم
+def fetch_historical_data(symbol, interval='15m', days=2):
     cache_duration = 300  # 5 دقائق
     current_time = time.time()
     if symbol in historical_data_cache:
@@ -258,7 +259,7 @@ def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
     df['MACD_hist'] = df['MACD'] - df['MACD_signal']
     return df[['MACD', 'MACD_signal', 'MACD_hist']]
 
-def calculate_Bollinger_Bands(df, period=20, std_multiplier=2):
+def calculate_Bollinger_Bands(df, period=30, std_multiplier=2):
     sma = df['close'].rolling(window=period).mean()
     std = df['close'].rolling(window=period).std()
     upper_band = sma + std_multiplier * std
@@ -272,6 +273,81 @@ def calculate_price_channel(df_day):
     upper_channel = df_day['high'].max()
     return lower_channel, upper_channel
 
+# ---------------------- الاستراتيجية 1: نموذج تجميعي + قناة (Donchian) ----------------------
+def generate_signal_strategy1(df, symbol):
+    df = df.dropna().reset_index(drop=True)
+    if len(df) < 100:
+        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
+        return None
+
+    df['prev_close'] = df['close'].shift(1)
+    df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
+    df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
+    df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
+    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
+    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
+    df['rsi_feature'] = calculate_rsi(df).shift(1)
+    df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
+    df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
+    df['momentum'] = df['close'] - df['close'].shift(10)
+    features = ['prev_close', 'sma10', 'sma20', 'sma50', 'ema10', 'ema20', 'ema50',
+                'rsi_feature', 'atr_feature', 'volatility', 'momentum']
+    df_features = df.dropna().reset_index(drop=True)
+    if len(df_features) < 50:
+        logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
+        return None
+
+    X = df_features[features]
+    y = df_features['close']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
+    from sklearn.linear_model import Ridge
+    from xgboost import XGBRegressor
+    model1 = RandomForestRegressor(n_estimators=200, random_state=42)
+    model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
+    model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
+    model4 = Ridge()
+    model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
+    voting_reg = VotingRegressor([
+        ('rf', model1),
+        ('gbr', model2),
+        ('etr', model3),
+        ('ridge', model4),
+        ('xgb', model5)
+    ])
+    voting_reg.fit(X_train_scaled, y_train)
+    score = voting_reg.score(X_test_scaled, y_test)
+    confidence = round(score * 100, 2)
+    logger.info(f"ثقة الاستراتيجية 1 لـ {symbol}: {confidence}%")
+    current_price = df['close'].iloc[-1]
+    if len(df) >= 96:
+        day_df = df.tail(96)
+    else:
+        day_df = df
+    lower_channel, upper_channel = calculate_price_channel(day_df)
+    if not (lower_channel < current_price < upper_channel):
+        logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة (Donchian)")
+        return None
+    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
+    stop_loss = lower_channel - margin
+    target = upper_channel
+    rounded_price = float(format(current_price, '.4f'))
+    rounded_target = float(format(target, '.4f'))
+    rounded_stop_loss = float(format(stop_loss, '.4f'))
+    return {
+        'symbol': symbol,
+        'price': rounded_price,
+        'target': rounded_target,
+        'stop_loss': rounded_stop_loss,
+        'confidence': confidence,
+        'trade_value': TRADE_VALUE,
+        'strategy': 'Strategy1'
+    }
+
 # ---------------------- الاستراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
 def generate_signal_strategy2(df, symbol):
     df = df.dropna().reset_index(drop=True)
@@ -284,7 +360,7 @@ def generate_signal_strategy2(df, symbol):
         day_df = df
     macd_df = calculate_MACD(day_df.copy())
     macd_latest = macd_df.iloc[-1]
-    lower_bb, middle_bb, upper_bb = calculate_Bollinger_Bands(day_df.copy(), period=20, std_multiplier=2)
+    lower_bb, middle_bb, upper_bb = calculate_Bollinger_Bands(day_df.copy(), period=30, std_multiplier=2)
     rsi_val = calculate_rsi(day_df.copy(), period=14).iloc[-1]
     current_price = day_df['close'].iloc[-1]
     logger.info(f"{symbol} - MACD: {macd_latest['MACD']:.4f}, Signal: {macd_latest['MACD_signal']:.4f}, RSI: {rsi_val:.2f}")
@@ -316,8 +392,27 @@ def generate_signal_strategy2(df, symbol):
     }
 
 def generate_trade_signal(df, symbol):
-    # نعتمد على الاستراتيجية الثانية فقط
-    return generate_signal_strategy2(df.copy(), symbol)
+    signal1 = generate_signal_strategy1(df.copy(), symbol)
+    signal2 = generate_signal_strategy2(df.copy(), symbol)
+    if signal1 and signal2:
+        signal = signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
+    elif signal1:
+        signal = signal1
+    elif signal2:
+        signal = signal2
+    else:
+        return None
+
+    # تطبيق قواعد نسبة الأهداف:
+    # الهدف يجب أن يكون على الأقل 1% فوق سعر الدخول.
+    # وقف الخسارة يتم تحديده عند انخفاض السعر بنسبة 1.5% من سعر الدخول.
+    entry_price = signal['price']
+    min_target = entry_price * 1.01
+    fixed_stop_loss = entry_price * 0.985
+    if signal['target'] < min_target:
+        signal['target'] = float(format(min_target, '.4f'))
+    signal['stop_loss'] = float(format(fixed_stop_loss, '.4f'))
+    return signal
 
 # ---------------------- دالة الحصول على نسب السيطرة على السوق ----------------------
 def get_market_dominance():
@@ -546,7 +641,7 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)  # بيانات لمدة يومين على فريم 5 دقائق
+            df = fetch_historical_data(symbol)  # بيانات لمدة يومين على فريم 15 دقيقة
             if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
