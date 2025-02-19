@@ -10,8 +10,6 @@ from threading import Thread
 import logging
 import requests
 import json  # لاستخدام reply_markup في تنبيهات (Telegram)
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -204,215 +202,68 @@ def fetch_recent_volume(symbol):
         logger.error(f"خطأ في جلب حجم {symbol}: {e}")
         return 0
 
-def calculate_volatility(df):
-    df['returns'] = df['close'].pct_change()
-    vol = df['returns'].std() * np.sqrt(24 * 60 / 5) * 100
-    logger.info(f"تم حساب التقلب: {vol:.2f}%")
-    return vol
-
-def calculate_ichimoku(df, tenkan=9, kijun=26, senkou_b=52, displacement=26):
-    logger.info("بدء حساب مؤشر (Ichimoku)")
-    df['tenkan_sen'] = (df['high'].rolling(window=tenkan).max() + df['low'].rolling(window=tenkan).min()) / 2
-    df['kijun_sen'] = (df['high'].rolling(window=kijun).max() + df['low'].rolling(window=kijun).min()) / 2
-    df['senkou_span_a'] = ((df['tenkan_sen'] + df['kijun_sen']) / 2).shift(displacement)
-    df['senkou_span_b'] = ((df['high'].rolling(window=senkou_b).max() + df['low'].rolling(window=senkou_b).min()) / 2).shift(displacement)
-    df['chikou_span'] = df['close'].shift(-displacement)
-    logger.info("انتهى حساب مؤشر (Ichimoku)")
-    return df
-
-def calculate_rsi(df, period=14):
-    logger.info("بدء حساب مؤشر (RSI)")
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    last_rsi = rsi.iloc[-1]
-    logger.info(f"تم حساب مؤشر (RSI): {last_rsi:.2f}")
-    return rsi
-
-def calculate_atr(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift(1)).abs()
-    low_close = (df['low'] - df['close'].shift(1)).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr = true_range.rolling(window=period).mean().iloc[-1]
-    logger.info(f"تم حساب (ATR): {atr:.8f}")
-    return atr
-
-def calculate_atr_series(df, period=14):
-    high_low = df['high'] - df['low']
-    high_close = (df['high'] - df['close'].shift(1)).abs()
-    low_close = (df['low'] - df['close'].shift(1)).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    atr_series = true_range.rolling(window=period).mean()
-    return atr_series
-
-# ---------------------- دوال إضافية للاستراتيجية 2 (MACD, Bollinger Bands) ----------------------
-def calculate_MACD(df, short_period=12, long_period=26, signal_period=9):
-    df['ema_short'] = df['close'].ewm(span=short_period, adjust=False).mean()
-    df['ema_long'] = df['close'].ewm(span=long_period, adjust=False).mean()
-    df['MACD'] = df['ema_short'] - df['ema_long']
-    df['MACD_signal'] = df['MACD'].ewm(span=signal_period, adjust=False).mean()
-    df['MACD_hist'] = df['MACD'] - df['MACD_signal']
-    return df[['MACD', 'MACD_signal', 'MACD_hist']]
-
-def calculate_Bollinger_Bands(df, period=30, std_multiplier=2):
-    sma = df['close'].rolling(window=period).mean()
-    std = df['close'].rolling(window=period).std()
-    upper_band = sma + std_multiplier * std
-    lower_band = sma - std_multiplier * std
-    return lower_band, sma, upper_band
-
-# ---------------------- دوال حساب القناة السعرية ----------------------
-def calculate_price_channel(df_day):
-    logger.info("حساب القناة السعرية باستخدام بيانات اليوم على فريم 15 دقيقة")
-    lower_channel = df_day['low'].min()
-    upper_channel = df_day['high'].max()
-    return lower_channel, upper_channel
-
-# ---------------------- الاستراتيجية 1: نموذج تجميعي + قناة (Donchian) ----------------------
-def generate_signal_strategy1(df, symbol):
-    df = df.dropna().reset_index(drop=True)
-    if len(df) < 100:
-        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 1")
-        return None
-
-    df['prev_close'] = df['close'].shift(1)
-    df['sma10'] = df['close'].rolling(window=10).mean().shift(1)
-    df['sma20'] = df['close'].rolling(window=20).mean().shift(1)
-    df['sma50'] = df['close'].rolling(window=50).mean().shift(1)
-    df['ema10'] = df['close'].ewm(span=10, adjust=False).mean().shift(1)
-    df['ema20'] = df['close'].ewm(span=20, adjust=False).mean().shift(1)
-    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean().shift(1)
-    df['rsi_feature'] = calculate_rsi(df).shift(1)
-    df['atr_feature'] = calculate_atr_series(df, period=14).shift(1)
-    df['volatility'] = df['close'].pct_change().rolling(window=10).std().shift(1)
-    df['momentum'] = df['close'] - df['close'].shift(10)
-    features = ['prev_close', 'sma10', 'sma20', 'sma50', 'ema10', 'ema20', 'ema50',
-                'rsi_feature', 'atr_feature', 'volatility', 'momentum']
-    df_features = df.dropna().reset_index(drop=True)
-    if len(df_features) < 50:
-        logger.warning(f"بيانات الميزات لـ {symbol} غير كافية للاستراتيجية 1")
-        return None
-
-    X = df_features[features]
-    y = df_features['close']
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, ExtraTreesRegressor, VotingRegressor
-    from sklearn.linear_model import Ridge
-    from xgboost import XGBRegressor
-    model1 = RandomForestRegressor(n_estimators=200, random_state=42)
-    model2 = GradientBoostingRegressor(n_estimators=200, random_state=42)
-    model3 = ExtraTreesRegressor(n_estimators=200, random_state=42)
-    model4 = Ridge()
-    model5 = XGBRegressor(n_estimators=200, random_state=42, objective='reg:squarederror')
-    voting_reg = VotingRegressor([
-        ('rf', model1),
-        ('gbr', model2),
-        ('etr', model3),
-        ('ridge', model4),
-        ('xgb', model5)
-    ])
-    voting_reg.fit(X_train_scaled, y_train)
-    score = voting_reg.score(X_test_scaled, y_test)
-    confidence = round(score * 100, 2)
-    logger.info(f"ثقة الاستراتيجية 1 لـ {symbol}: {confidence}%")
-    current_price = df['close'].iloc[-1]
+# ---------------------- استراتيجية تداول الشبكة (Grid Trading) ----------------------
+def generate_grid_signal(df, symbol):
+    """
+    تقوم هذه الدالة بالتحقق مما إذا كان السوق عرضياً (جهد نطاقي صغير)
+    بناءً على بيانات اليوم (آخر 24 ساعة) على فريم 15 دقيقة،
+    ثم تحسب متوسط أعلى سعر ومتوسط أدنى سعر وتحدد مستويات الشبكة.
+    إذا كان السعر الحالي قريباً من أدنى مستوى في الشبكة (ضمن 1%)،
+    يتم إصدار إشارة شراء بحيث يكون الهدف هو المستوى التالي
+    ووقف الخسارة محدد تحت المستوى الأدنى بنسبة 1%.
+    """
+    # استخدام بيانات اليوم (آخر 24 ساعة)
     if len(df) >= 96:
         day_df = df.tail(96)
     else:
         day_df = df
-    lower_channel, upper_channel = calculate_price_channel(day_df)
-    if not (lower_channel < current_price < upper_channel):
-        logger.info(f"تجاهل {symbol} - السعر الحالي خارج قناة (Donchian)")
+    avg_high = day_df['high'].mean()
+    avg_low = day_df['low'].mean()
+    mid_price = (avg_high + avg_low) / 2
+    # التحقق مما إذا كان السوق عرضياً (نسبة النطاق إلى المتوسط أقل من 5%)
+    if (avg_high - avg_low) / mid_price > 0.05:
+        logger.info(f"تجاهل {symbol} - السوق ليس عرضياً (النطاق {(avg_high - avg_low):.4f} غير مناسب)")
         return None
-    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
-    stop_loss = lower_channel - margin
-    target = upper_channel
-    rounded_price = float(format(current_price, '.4f'))
-    rounded_target = float(format(target, '.4f'))
-    rounded_stop_loss = float(format(stop_loss, '.4f'))
-    return {
-        'symbol': symbol,
-        'price': rounded_price,
-        'target': rounded_target,
-        'stop_loss': rounded_stop_loss,
-        'confidence': confidence,
-        'trade_value': TRADE_VALUE,
-        'strategy': 'Strategy1'
-    }
 
-# ---------------------- الاستراتيجية 2: MACD + Bollinger Bands + RSI ----------------------
-def generate_signal_strategy2(df, symbol):
-    df = df.dropna().reset_index(drop=True)
-    if len(df) < 50:
-        logger.warning(f"بيانات {symbol} غير كافية للاستراتيجية 2")
-        return None
-    if len(df) >= 96:
-        day_df = df.tail(96)
-    else:
-        day_df = df
-    macd_df = calculate_MACD(day_df.copy())
-    macd_latest = macd_df.iloc[-1]
-    lower_bb, middle_bb, upper_bb = calculate_Bollinger_Bands(day_df.copy(), period=30, std_multiplier=2)
-    rsi_val = calculate_rsi(day_df.copy(), period=14).iloc[-1]
+    # إعداد مستويات الشبكة (مثلاً 5 مستويات)
+    grid_count = 5
+    grid_spacing = (avg_high - avg_low) / (grid_count - 1)
+    grid_levels = [avg_low + i * grid_spacing for i in range(grid_count)]
     current_price = day_df['close'].iloc[-1]
-    logger.info(f"{symbol} - MACD: {macd_latest['MACD']:.4f}, Signal: {macd_latest['MACD_signal']:.4f}, RSI: {rsi_val:.2f}")
-    if macd_latest['MACD'] <= macd_latest['MACD_signal']:
-        logger.info(f"تجاهل {symbol} - MACD لم يتقاطع صعودياً")
+    
+    # البحث عن المستوى الأدنى في الشبكة الذي يكون أقل من أو قريب من السعر الحالي
+    entry_level = None
+    next_level = None
+    for i, level in enumerate(grid_levels):
+        if current_price >= level:
+            entry_level = level
+            if i < grid_count - 1:
+                next_level = grid_levels[i + 1]
+            else:
+                next_level = avg_high
+    if entry_level is None:
+        entry_level = grid_levels[0]
+        next_level = grid_levels[1]
+    
+    # إذا كان السعر الحالي ليس قريباً (ضمن 1%) من المستوى الأدنى في الشبكة، نتجاهل الإشارة
+    if current_price > entry_level * 1.01:
+        logger.info(f"تجاهل {symbol} - السعر الحالي {current_price:.4f} ليس قريباً من مستوى الشبكة السفلي {entry_level:.4f}")
         return None
-    if rsi_val > 30:
-        logger.info(f"تجاهل {symbol} - RSI غير مناسب (RSI = {rsi_val:.2f})")
-        return None
-    if current_price > lower_bb.iloc[-1] * 1.05:
-        logger.info(f"تجاهل {symbol} - السعر ليس قريباً من الفرقة السفلية لـ (Bollinger Bands)")
-        return None
-    stop_loss = lower_bb.iloc[-1]
-    target = upper_bb.iloc[-1]
-    margin = current_price * 0.002  # خفض وقف الخسارة بنسبة 0.2%
-    stop_loss_adjusted = stop_loss - margin
-    confidence = round((macd_latest['MACD'] - macd_latest['MACD_signal']) * 100, 2)
-    rounded_price = float(format(current_price, '.4f'))
-    rounded_target = float(format(target, '.4f'))
-    rounded_stop_loss = float(format(stop_loss_adjusted, '.4f'))
+
+    entry_price = current_price
+    target = next_level
+    stop_loss = entry_level * 0.99  # وقف خسارة بنسبة 1% تحت مستوى الدخول
+    confidence = 80  # قيمة افتراضية للثقة في الاستراتيجية
+
     return {
         'symbol': symbol,
-        'price': rounded_price,
-        'target': rounded_target,
-        'stop_loss': rounded_stop_loss,
+        'price': float(format(entry_price, '.4f')),
+        'target': float(format(target, '.4f')),
+        'stop_loss': float(format(stop_loss, '.4f')),
         'confidence': confidence,
         'trade_value': TRADE_VALUE,
-        'strategy': 'Strategy2'
+        'strategy': 'GridTrading'
     }
-
-def generate_trade_signal(df, symbol):
-    signal1 = generate_signal_strategy1(df.copy(), symbol)
-    signal2 = generate_signal_strategy2(df.copy(), symbol)
-    if signal1 and signal2:
-        signal = signal1 if signal1['confidence'] >= signal2['confidence'] else signal2
-    elif signal1:
-        signal = signal1
-    elif signal2:
-        signal = signal2
-    else:
-        return None
-
-    # تطبيق قواعد نسبة الأهداف:
-    # الهدف يجب أن يكون على الأقل 1% فوق سعر الدخول.
-    # وقف الخسارة يتم تحديده عند انخفاض السعر بنسبة 1.5% من سعر الدخول.
-    entry_price = signal['price']
-    min_target = entry_price * 1.01
-    fixed_stop_loss = entry_price * 0.985
-    if signal['target'] < min_target:
-        signal['target'] = float(format(min_target, '.4f'))
-    signal['stop_loss'] = float(format(fixed_stop_loss, '.4f'))
-    return signal
 
 # ---------------------- دالة الحصول على نسب السيطرة على السوق ----------------------
 def get_market_dominance():
@@ -440,11 +291,11 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
         loss = round((signal['stop_loss'] / signal['price'] - 1) * 100, 2)
         rtl_mark = "\u200F"
         message = (
-            f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
+            f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']} (Grid Trading)**\n\n"
             f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📊 الاستراتيجية: ({signal['strategy']}) - ثقة: {signal['confidence']}%\n"
+            f"📊 الثقة: {signal['confidence']}%\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -545,7 +396,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- دوال تتبع الإشارات ----------------------
+# ---------------------- دالة تتبع الإشارات ----------------------
 def track_signals():
     logger.info("بدء خدمة تتبع الإشارات...")
     while True:
@@ -627,7 +478,6 @@ def analyze_market():
         logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
         return
 
-    btc_trend = True  # إزالة شرط اختبار البيتكوين؛ نعتبره دائماً True.
     btc_dominance, eth_dominance = get_market_dominance()
     if btc_dominance is None or eth_dominance is None:
         logger.warning("لم يتم جلب نسب السيطرة؛ سيتم تعيينها كـ 0.0")
@@ -642,30 +492,17 @@ def analyze_market():
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
             df = fetch_historical_data(symbol)  # بيانات لمدة يومين على فريم 15 دقيقة
-            if df is None or len(df) < 100:
+            if df is None or len(df) < 96:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            signal = generate_trade_signal(df, symbol)
+            signal = generate_grid_signal(df, symbol)
             if not signal:
                 continue
-            ichimoku_df = calculate_ichimoku(df.copy())
-            last_row = ichimoku_df.iloc[-1]
-            if last_row['close'] <= max(last_row['senkou_span_a'], last_row['senkou_span_b']):
-                logger.info(f"تجاهل {symbol} - السعر ليس فوق السحابة وفق مؤشر (Ichimoku)")
-                continue
-            if last_row['tenkan_sen'] <= last_row['kijun_sen']:
-                logger.info(f"تجاهل {symbol} - تقاطع مؤشر (Ichimoku) غير صعودي")
-                continue
-            rsi_series = calculate_rsi(df)
-            last_rsi = rsi_series.iloc[-1]
-            if last_rsi > 30:
-                logger.info(f"تجاهل {symbol} - شرط (RSI) غير مستوفى (RSI = {last_rsi:.2f})")
-                continue
-            logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
+            logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} باستخدام Grid Trading")
             send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
             try:
                 cur.execute("""
