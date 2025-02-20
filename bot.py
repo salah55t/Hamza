@@ -338,7 +338,8 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"📈 **نسب السيطرة على السوق (4H):**\n"
             f"   - BTC: {btc_dominance:.2f}%\n"
             f"   - ETH: {eth_dominance:.2f}%\n\n"
-            f"⏰ {time.strftime('%Y-%m-%d %H:%M')}"
+            f"⏰ {get_gmt_plus1_time().strftime('%Y-%m-%d %H:%M')}"
+
         )
         reply_markup = {
             "inline_keyboard": [
