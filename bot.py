@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ---------------------- تحميل المتغيرات البيئية ----------------------
 api_key = config('BINANCE_API_KEY')
 api_secret = config('BINANCE_API_SECRET')
-# قيمة الصفقة الافتراضية
+# قيمة الصفقة الثابتة الافتراضية للتداول الشبكي
 TRADE_VALUE = 10
 
 # ---------------------- إعداد عميل Binance وتحديثات التيكر ----------------------
@@ -65,7 +65,7 @@ def get_crypto_symbols():
 
 def fetch_historical_data(symbol, interval='15m', days=2):
     """
-    جلب بيانات الشموع التاريخية مع استخدام ذاكرة تخزين مؤقت لمدة 5 دقائق.
+    جلب بيانات الشموع التاريخية مع استخدام ذاكرة تخزين مؤقت بسيطة لمدة 5 دقائق.
     """
     cache_duration = 300  # 5 دقائق
     current_time = time.time()
@@ -118,37 +118,56 @@ fetch_recent_volume.cache = {}
 def generate_grid_signal(df, symbol):
     """
     تحليل بيانات اليوم (آخر 24 ساعة) على فريم 15 دقيقة لتحديد ما إذا كان السوق عرضياً.
-    في حال كان السوق ضمن نطاق صغير يتم إعداد مستويات شبكة (grid) من 5 مستويات.
-    تُحدد الإشارة بحيث يكون السعر الحالي قريباً من أقل مستوى في الشبكة (ضمن 1%).
+    إذا كان السعر الحالي صفرًا أو غير صالح، يتم تسجيل الخطأ وتجاهل الحساب.
+    
+    تُحسب مستويات شبكة (grid) من 5 مستويات.
+    يتم إنشاء الإشارة في حال كان السعر الحالي قريباً (ضمن 1%) من أدنى مستوى في الشبكة.
     """
+    # استخدام بيانات اليوم (آخر 24 ساعة)
     day_df = df.tail(96) if len(df) >= 96 else df
+    current_price = day_df['close'].iloc[-1]
+    
+    # التحقق من أن السعر الحالي أكبر من صفر
+    if current_price <= 0:
+        logger.error(f"سعر الإغلاق للزوج {symbol} صفر أو غير صالح، تجاهل الحساب.")
+        return None
+
     avg_high = day_df['high'].mean()
     avg_low = day_df['low'].mean()
     mid_price = (avg_high + avg_low) / 2
+
+    # التأكد من أن السوق عرضي (نطاق صغير أقل من 5% من المتوسط)
     if (avg_high - avg_low) / mid_price > 0.05:
         logger.info(f"تجاهل {symbol} - السوق ليس عرضياً (النطاق {(avg_high - avg_low):.4f} غير مناسب)")
         return None
 
+    # إعداد شبكة من 5 مستويات
     grid_count = 5
     grid_spacing = (avg_high - avg_low) / (grid_count - 1)
     grid_levels = [avg_low + i * grid_spacing for i in range(grid_count)]
-    current_price = day_df['close'].iloc[-1]
     
+    # تحديد مستوى الدخول: اختيار أقرب مستوى أقل من السعر الحالي
     entry_index = 0
     for i, level in enumerate(grid_levels):
         if current_price >= level:
             entry_index = i
+
+    # شرط: يجب أن يكون السعر الحالي قريباً (ضمن 1%) من المستوى الأدنى المحدد
     if current_price > grid_levels[entry_index] * 1.01:
         logger.info(f"تجاهل {symbol} - السعر الحالي {current_price:.4f} ليس قريباً من مستوى الشبكة السفلي {grid_levels[entry_index]:.4f}")
         return None
 
+    entry_price = current_price
+    target = grid_levels[-1]
+    stop_loss = grid_levels[0] * 0.99  # وقف خسارة بنسبة 1% تحت أدنى مستوى في الشبكة
+
     signal = {
         'symbol': symbol,
-        'entry_price': float(format(current_price, '.4f')),
-        'target': float(format(grid_levels[-1], '.4f')),
-        'stop_loss': float(format(grid_levels[0] * 0.99, '.4f')),
+        'entry_price': float(format(entry_price, '.4f')),
+        'target': float(format(target, '.4f')),
+        'stop_loss': float(format(stop_loss, '.4f')),
         'grid_levels': grid_levels,
-        'grid_index': entry_index,
+        'grid_index': entry_index,  # الفهرس الحالي في الشبكة
         'trade_value': TRADE_VALUE,
         'strategy': 'GridTrading',
         'closed': False
@@ -158,14 +177,14 @@ def generate_grid_signal(df, symbol):
 def simulate_grid_trade(signal):
     """
     تحاكي هذه الدالة حركة الصفقة الافتراضية باستخدام مستويات الشبكة.
-    - إذا تجاوز السعر المستوى التالي في الشبكة (للبيع الافتراضي) يتم تسجيل ربح افتراضي وتحديث الفهرس.
-    - إذا انخفض السعر دون المستوى الحالي (إشارة إعادة شراء افتراضية) يتم تحديث الفهرس لتقليل متوسط التكلفة.
-    - تُغلق الصفقة عند الوصول إلى الهدف (أعلى مستوى) أو عند تفعيل وقف الخسارة.
+    - إذا تجاوز السعر المستوى التالي في الشبكة (بيع افتراضي) يتم تسجيل ربح وتحديث الفهرس.
+    - إذا انخفض السعر دون المستوى الحالي (إعادة شراء افتراضية) يتم تحديث الفهرس لتقليل متوسط التكلفة.
+    - تُغلق الصفقة عند تحقيق الهدف (أعلى مستوى) أو عند الوصول إلى وقف الخسارة.
     """
     symbol = signal['symbol']
     if symbol not in ticker_data:
         logger.warning(f"لا توجد بيانات تيكر حالية للزوج {symbol}")
-        return signal
+        return signal  # لا يوجد تحديث للسعر
 
     current_price = float(ticker_data[symbol].get('c', 0))
     grid_levels = signal['grid_levels']
@@ -183,13 +202,13 @@ def simulate_grid_trade(signal):
         logger.info(f"{symbol}: انخفاض السعر تحت {grid_levels[index]:.4f} – إعادة شراء افتراضية، خسارة تقريبية ${loss:.2f}")
         signal['grid_index'] -= 1
 
-    # التحقق من وقف الخسارة
+    # فحص وقف الخسارة
     if current_price <= signal['stop_loss']:
         logger.info(f"{symbol}: وصل السعر إلى وقف الخسارة {signal['stop_loss']:.4f}. إغلاق الصفقة بخسارة.")
         signal['closed'] = True
         signal['result'] = 'stop_loss'
 
-    # التحقق من تحقيق الهدف (أعلى مستوى)
+    # فحص تحقيق الهدف (أعلى مستوى في الشبكة)
     if signal['grid_index'] == len(grid_levels) - 1:
         logger.info(f"{symbol}: تم الوصول إلى الهدف {signal['target']:.4f}. إغلاق الصفقة بربح.")
         signal['closed'] = True
@@ -198,12 +217,13 @@ def simulate_grid_trade(signal):
     return signal
 
 # ---------------------- إدارة الصفقات الافتراضية ----------------------
+# تخزين الصفقات النشطة (لا يزيد عددها عن 4)
 active_trades = {}  # المفتاح: الرمز، والقيمة: بيانات الصفقة (signal)
 
 def analyze_market():
     """
-    تفحص هذه الدالة الأزواج من الملف وتولد إشارة تداول في حال تحقق الشروط،
-    ويتم فتح صفقة افتراضية جديدة إذا كان عدد الصفقات النشطة أقل من 4.
+    تفحص هذه الدالة الأزواج من الملف، وتستخدم البيانات التاريخية وحجم السيولة لتوليد إشارة تداول.
+    في حال تحقق الشروط وتكون الصفقات النشطة أقل من 4، يتم فتح صفقة افتراضية جديدة.
     """
     if len(active_trades) >= 4:
         logger.info("عدد الصفقات النشطة وصل إلى الحد الأقصى (4). لن يتم فتح صفقة جديدة.")
@@ -226,6 +246,7 @@ def analyze_market():
         if symbol in active_trades:
             logger.info(f"{symbol}: صفقة مفتوحة بالفعل.")
             continue
+        # محاكاة الشراء الافتراضي بقيمة 10 دولار
         logger.info(f"{symbol}: تنفيذ شراء افتراضي بقيمة ${TRADE_VALUE} عند السعر {signal['entry_price']}")
         active_trades[symbol] = signal
         if len(active_trades) >= 4:
@@ -235,43 +256,32 @@ def simulation_loop():
     """
     حلقة متكررة لتحديث حالة الصفقات الافتراضية عبر محاكاة حركة السعر ضمن شبكة التداول.
     تُحدّث الصفقات المفتوحة وتُغلق عند تحقيق الهدف أو تفعيل وقف الخسارة.
-    تتضمن الحلقة معالجة لحالة سعر الدخول إذا كان صفر تقريباً.
     """
     while True:
         symbols_to_close = []
-        for symbol, trade in list(active_trades.items()):
-            # معالجة حالة سعر الدخول إذا كان صفر تقريباً
-            if abs(trade['entry_price']) < 1e-8:
-                if symbol in ticker_data:
-                    current_price = float(ticker_data[symbol].get('c', 0))
-                    if abs(current_price) > 1e-8:
-                        trade['entry_price'] = current_price
-                        logger.info(f"تم تحديث سعر الدخول للزوج {symbol} بالسعر الحالي: {current_price}")
-                    else:
-                        logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً حتى بعد محاولة التحديث، يتم تخطي الحساب.")
-                        continue
-                else:
-                    logger.error(f"لا توجد بيانات التيكر للزوج {symbol} لتحديث سعر الدخول، يتم تخطي الحساب.")
-                    continue
-
+        for symbol, trade in active_trades.items():
             updated_trade = simulate_grid_trade(trade)
             active_trades[symbol] = updated_trade
             if updated_trade.get('closed'):
                 logger.info(f"{symbol}: الصفقة أُغلقت، النتيجة: {updated_trade.get('result')}")
                 symbols_to_close.append(symbol)
+        # إزالة الصفقات المُغلقة من القاموس
         for s in symbols_to_close:
             del active_trades[s]
         time.sleep(10)  # تحديث كل 10 ثوانٍ
 
 # ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
+    # بدء تحديث التيكر عبر WebSocket في مسار منفصل
     Thread(target=run_ticker_socket_manager, daemon=True).start()
+    # بدء حلقة المحاكاة لتحديث الصفقات الافتراضية
     Thread(target=simulation_loop, daemon=True).start()
 
+    # جدولة فحص السوق بشكل دوري (كل 5 دقائق)
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=5)
     scheduler.start()
-    
+
     logger.info("✅ بدأ تشغيل المحاكي للاستراتيجيات الافتراضية!")
     try:
         while True:
