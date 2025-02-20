@@ -9,7 +9,7 @@ from flask import Flask, request
 from threading import Thread
 import logging
 import requests
-import json  # لاستخدام reply_markup في تنبيهات (Telegram)
+import json  # لاستخدام reply_markup في تنبيهات Telegram
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -57,6 +57,7 @@ def init_db():
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
                 sent_at TIMESTAMP DEFAULT NOW(),
+                strategy TEXT,
                 CONSTRAINT unique_symbol_time UNIQUE (symbol, sent_at)
             )
         """)
@@ -81,14 +82,14 @@ def check_db_connection():
             logger.error(f"فشل إعادة الاتصال: {ex}")
             raise
 
-# ---------------------- إعداد عميل (Binance) ----------------------
+# ---------------------- إعداد عميل Binance ----------------------
 client = Client(api_key, api_secret)
 
 # ---------------------- آلية التخزين المؤقت ----------------------
 historical_data_cache = {}   # يخزن: { symbol: (timestamp, dataframe) }
 volume_data_cache = {}       # يخزن: { symbol: (timestamp, volume) }
 
-# ---------------------- استخدام (WebSocket) لتحديث بيانات التيكر ----------------------
+# ---------------------- استخدام WebSocket لتحديث التيكر ----------------------
 ticker_data = {}
 
 def handle_ticker_message(msg):
@@ -114,7 +115,7 @@ def run_ticker_socket_manager():
     except Exception as e:
         logger.error(f"خطأ في تشغيل WebSocket: {e}")
 
-# ---------------------- إعداد تطبيق (Flask) ----------------------
+# ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -158,7 +159,6 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-# استخدام فريم (15m) لتداول اليوم
 def fetch_historical_data(symbol, interval='15m', days=2):
     cache_duration = 300  # 5 دقائق
     current_time = time.time()
@@ -202,68 +202,56 @@ def fetch_recent_volume(symbol):
         logger.error(f"خطأ في جلب حجم {symbol}: {e}")
         return 0
 
-# ---------------------- استراتيجية تداول الشبكة (Grid Trading) ----------------------
-def generate_grid_signal(df, symbol):
+# ---------------------- استراتيجية المنحنى البارابولي (Parabolic Curve Pattern) ----------------------
+def detect_parabolic_pattern(df, symbol):
     """
-    تقوم هذه الدالة بالتحقق مما إذا كان السوق عرضياً (جهد نطاقي صغير)
-    بناءً على بيانات اليوم (آخر 24 ساعة) على فريم 15 دقيقة،
-    ثم تحسب متوسط أعلى سعر ومتوسط أدنى سعر وتحدد مستويات الشبكة.
-    إذا كان السعر الحالي قريباً من أدنى مستوى في الشبكة (ضمن 1%)،
-    يتم إصدار إشارة شراء بحيث يكون الهدف هو المستوى التالي
-    ووقف الخسارة محدد تحت المستوى الأدنى بنسبة 1%.
+    تحاول هذه الدالة اكتشاف نموذج المنحنى البارابولي عبر تحليل آخر 5 نقاط حرجة.
+    يتم استخراج نقاط القمم والقيعان من بيانات الإغلاق.
+    إذا كان النمط هو: [max, min, max, min, max] وكانت القمة الثالثة أعلى بنسبة 5% على الأقل من القمة الأولى،
+    فإن الدالة تُرجع إشارة تداول تحتوي على:
+       - رمز التداول
+       - سعر الدخول: السعر الحالي (آخر سعر إغلاق)
+       - الهدف: القمة الثالثة
+       - وقف الخسارة: القاع الرابع
+       - استراتيجية: ParabolicCurve
+       - قيمة الصفقة: TRADE_VALUE
     """
-    # استخدام بيانات اليوم (آخر 24 ساعة)
-    if len(df) >= 96:
-        day_df = df.tail(96)
-    else:
-        day_df = df
-    avg_high = day_df['high'].mean()
-    avg_low = day_df['low'].mean()
-    mid_price = (avg_high + avg_low) / 2
-    # التحقق مما إذا كان السوق عرضياً (نسبة النطاق إلى المتوسط أقل من 5%)
-    if (avg_high - avg_low) / mid_price > 0.05:
-        logger.info(f"تجاهل {symbol} - السوق ليس عرضياً (النطاق {(avg_high - avg_low):.4f} غير مناسب)")
+    prices = df['close'].values
+    swings = []  # تخزين النقاط على شكل tuples: (نوع النقطة 'max' أو 'min', السعر، index)
+    
+    # تحديد القمم والقيعان بنمط بسيط
+    for i in range(1, len(prices)-1):
+        if prices[i] > prices[i-1] and prices[i] > prices[i+1]:
+            swings.append(('max', prices[i], i))
+        elif prices[i] < prices[i-1] and prices[i] < prices[i+1]:
+            swings.append(('min', prices[i], i))
+    
+    if len(swings) < 5:
+        logger.info(f"{symbol}: لا توجد نقاط حرجة كافية لاكتشاف النموذج")
         return None
 
-    # إعداد مستويات الشبكة (مثلاً 5 مستويات)
-    grid_count = 5
-    grid_spacing = (avg_high - avg_low) / (grid_count - 1)
-    grid_levels = [avg_low + i * grid_spacing for i in range(grid_count)]
-    current_price = day_df['close'].iloc[-1]
+    recent_swings = swings[-5:]
+    pattern = [s[0] for s in recent_swings]
     
-    # البحث عن المستوى الأدنى في الشبكة الذي يكون أقل من أو قريب من السعر الحالي
-    entry_level = None
-    next_level = None
-    for i, level in enumerate(grid_levels):
-        if current_price >= level:
-            entry_level = level
-            if i < grid_count - 1:
-                next_level = grid_levels[i + 1]
-            else:
-                next_level = avg_high
-    if entry_level is None:
-        entry_level = grid_levels[0]
-        next_level = grid_levels[1]
-    
-    # إذا كان السعر الحالي ليس قريباً (ضمن 1%) من المستوى الأدنى في الشبكة، نتجاهل الإشارة
-    if current_price > entry_level * 1.01:
-        logger.info(f"تجاهل {symbol} - السعر الحالي {current_price:.4f} ليس قريباً من مستوى الشبكة السفلي {entry_level:.4f}")
-        return None
-
-    entry_price = current_price
-    target = next_level
-    stop_loss = entry_level * 0.99  # وقف خسارة بنسبة 1% تحت مستوى الدخول
-    confidence = 80  # قيمة افتراضية للثقة في الاستراتيجية
-
-    return {
-        'symbol': symbol,
-        'price': float(format(entry_price, '.4f')),
-        'target': float(format(target, '.4f')),
-        'stop_loss': float(format(stop_loss, '.4f')),
-        'confidence': confidence,
-        'trade_value': TRADE_VALUE,
-        'strategy': 'GridTrading'
-    }
+    # التحقق من نمط [max, min, max, min, max]
+    if pattern == ['max', 'min', 'max', 'min', 'max']:
+        first_max = recent_swings[0][1]
+        third_max = recent_swings[2][1]
+        # التأكد من أن القمة الثالثة أعلى بنسبة 5% على الأقل من القمة الأولى
+        if third_max > first_max * 1.05:
+            stop_loss = recent_swings[3][1]
+            entry_price = prices[-1]
+            signal = {
+                'symbol': symbol,
+                'entry_price': float(format(entry_price, '.4f')),
+                'target': float(format(third_max, '.4f')),
+                'stop_loss': float(format(stop_loss, '.4f')),
+                'strategy': 'ParabolicCurve',
+                'trade_value': TRADE_VALUE
+            }
+            return signal
+    logger.info(f"{symbol}: لم يتم الكشف عن نموذج المنحنى البارابولي")
+    return None
 
 # ---------------------- دالة الحصول على نسب السيطرة على السوق ----------------------
 def get_market_dominance():
@@ -287,20 +275,18 @@ def get_market_dominance():
 # ---------------------- دوال إرسال التنبيهات والتقارير ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
-        profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
-        loss = round((signal['stop_loss'] / signal['price'] - 1) * 100, 2)
+        profit = round((signal['target'] / signal['entry_price'] - 1) * 100, 2)
+        loss = round((signal['stop_loss'] / signal['entry_price'] - 1) * 100, 2)
         rtl_mark = "\u200F"
         message = (
-            f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']} (Grid Trading)**\n\n"
-            f"▫️ السعر الحالي: ${signal['price']}\n"
+            f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']} ({signal['strategy']})**\n\n"
+            f"▫️ سعر الدخول: ${signal['entry_price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📊 الثقة: {signal['confidence']}%\n"
-            f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
-            f"   - BTC: {btc_dominance:.2f}%\n"
-            f"   - ETH: {eth_dominance:.2f}%\n\n"
+            f"   - BTC: {btc_dominance if btc_dominance is not None else 0:.2f}%\n"
+            f"   - ETH: {eth_dominance if eth_dominance is not None else 0:.2f}%\n\n"
             f"⏰ {time.strftime('%Y-%m-%d %H:%M')}"
         )
         reply_markup = {
@@ -352,7 +338,7 @@ def send_telegram_alert_special(message):
 def send_report(target_chat_id):
     try:
         check_db_connection()
-        cur.execute("SELECT achieved_target, entry_price, target, stop_loss FROM signals WHERE closed_at IS NOT NULL")
+        cur.execute("SELECT achieved_target, entry_price, target, stop_loss, strategy FROM signals WHERE closed_at IS NOT NULL")
         closed_signals = cur.fetchall()
         success_count = 0
         stop_loss_count = 0
@@ -361,7 +347,7 @@ def send_report(target_chat_id):
         total_profit = 0.0
         total_loss = 0.0
         for row in closed_signals:
-            achieved_target, entry, target_val, stop_loss_val = row
+            achieved_target, entry, target_val, stop_loss_val, strategy = row
             if achieved_target:
                 profit_pct = (target_val / entry - 1) * 100
                 profit_dollar = TRADE_VALUE * (target_val / entry - 1)
@@ -469,7 +455,7 @@ def track_signals():
 
 # ---------------------- دالة تحليل السوق ----------------------
 def analyze_market():
-    logger.info("بدء فحص الأزواج الآن...")
+    logger.info("بدء فحص الأزواج الآن باستخدام استراتيجية المنحنى البارابولي...")
     check_db_connection()
     
     cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
@@ -499,23 +485,25 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
-            signal = generate_grid_signal(df, symbol)
+            # استخدام استراتيجية المنحنى البارابولي لاكتشاف الإشارة
+            signal = detect_parabolic_pattern(df, symbol)
             if not signal:
                 continue
-            logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} باستخدام Grid Trading")
+            logger.info(f"تم اكتشاف نموذج المنحنى البارابولي للزوج {symbol}")
             send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
             try:
                 cur.execute("""
                     INSERT INTO signals 
-                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m, strategy)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (
                     signal['symbol'],
-                    signal['price'],
+                    signal['entry_price'],
                     signal['target'],
                     signal['stop_loss'],
-                    signal['confidence'],
-                    volume_15m
+                    0,  # قيمة افتراضية للثقة (r2_score)
+                    volume_15m,
+                    signal['strategy']
                 ))
                 conn.commit()
                 logger.info(f"تم إدخال الإشارة بنجاح للزوج {symbol}")
@@ -561,3 +549,4 @@ if __name__ == '__main__':
             time.sleep(60)
     except (KeyboardInterrupt, SystemExit):
         scheduler.shutdown()
+        logger.info("تم إيقاف النظام.")
