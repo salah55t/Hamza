@@ -13,6 +13,11 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
+
+# ---------------------- دالة الحصول على الوقت بتوقيت GMT+1 ----------------------
+def get_gmt_plus1_time():
+    return datetime.utcnow() + timedelta(hours=1)
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -339,7 +344,6 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"   - BTC: {btc_dominance:.2f}%\n"
             f"   - ETH: {eth_dominance:.2f}%\n\n"
             f"⏰ {get_gmt_plus1_time().strftime('%Y-%m-%d %H:%M')}"
-
         )
         reply_markup = {
             "inline_keyboard": [
@@ -459,9 +463,10 @@ def track_signals():
                         logger.warning(f"لا يوجد تحديث أسعار لحظة {symbol} من WebSocket")
                         continue
                     logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
+                    # في حال كان سعر الدخول قريب من الصفر نستخدم السعر الحالي بدلًا عنه
                     if abs(entry) < 1e-8:
-                        logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
-                        continue
+                        logger.warning(f"سعر الدخول للزوج {symbol} صفر تقريباً، سيتم استخدام السعر الحالي ({current_price}) بدلاً منه.")
+                        entry = current_price
                     if current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -469,7 +474,7 @@ def track_signals():
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر الخروج: ${current_price:.8f}\n"
                             f"• الربح: +{profit:.2f}%\n"
-                            f"⏱ {time.strftime('%H:%M:%S')}"
+                            f"⏱ {get_gmt_plus1_time().strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
                         try:
@@ -486,7 +491,7 @@ def track_signals():
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر الخروج: ${current_price:.8f}\n"
                             f"• الخسارة: {loss:.2f}%\n"
-                            f"⏱ {time.strftime('%H:%M:%S')}"
+                            f"⏱ {get_gmt_plus1_time().strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
                         try:
