@@ -143,97 +143,37 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
-# ---------------------- تعريف استراتيجية نموذج المنحنى البارابولي ----------------------
-class ParabolicCurveStrategy:
-    """
-    استراتيجية نموذج المنحنى البارابولي (Parabolic Curve Pattern)
-    يُعرف هذا النمط أيضًا باسم "الخمس تدبيلات"، حيث يمر السعر بخمس مراحل:
-      1. صعود قوي.
-      2. تصحيح أو حركة عرضية.
-      3. صعود أقوى مع زخم عالي.
-      4. تصحيح آخر.
-      5. تأكيد استمرار الصعود.
-    تُعتبر الشمعة الخامسة إشارة دخول قوية إذا توافرت جميع الشروط.
-    """
-    stoploss = -0.02
-    minimal_roi = {"0": 0.02}
-
-    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if len(df) < 5:
-            return df
-        # حساب نسبة التغير لكل شمعة لتسهيل التحليل
-        df['pct_change'] = df['close'].pct_change() * 100
-        # حساب ATR لاستخدامه في تحديد الهدف ووقف الخسارة
-        df = calculate_atr_indicator(df)
-        return df
-
-    def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        if len(df) < 5:
-            return df
-        recent = df.iloc[-5:]
-        # الشمعة الأولى: صعود قوي (أكثر من 1%)
-        cond1 = (recent.iloc[0]['close'] > recent.iloc[0]['open']) and (((recent.iloc[0]['close'] - recent.iloc[0]['open']) / recent.iloc[0]['open']) > 0.01)
-        # الشمعة الثانية: حركة تصحيحية (إغلاق أقل من الشمعة الأولى)
-        cond2 = recent.iloc[1]['close'] < recent.iloc[0]['close']
-        # الشمعة الثالثة: صعود أقوى؛ يغلق السعر أعلى من سعر الشمعة الأولى بنسبة تزيد عن 2%
-        cond3 = (recent.iloc[2]['close'] > recent.iloc[0]['close']) and (((recent.iloc[2]['close'] - recent.iloc[0]['close']) / recent.iloc[0]['close']) > 0.02)
-        # الشمعة الرابعة: حركة تصحيحية بعد الصعود القوي (إغلاق أقل من الشمعة الثالثة)
-        cond4 = recent.iloc[3]['close'] < recent.iloc[2]['close']
-        # الشمعة الخامسة: تأكيد استمرار الصعود (شمعة صاعدة)
-        cond5 = recent.iloc[4]['close'] > recent.iloc[4]['open']
-        if cond1 and cond2 and cond3 and cond4 and cond5:
-            df.loc[df.index[-1], 'buy'] = 1
-        return df
-
-    def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        # شرط خروج مبسط: إذا هبط السعر دون متوسط حركة بسيطة للشموع الثلاث الأخيرة
-        if len(df) < 3:
-            return df
-        df['sma3'] = df['close'].rolling(window=3).mean()
-        conditions = df['close'] < df['sma3']
-        df.loc[conditions, 'sell'] = 1
-        return df
-
-# ---------------------- دالة توليد الإشارة باستخدام استراتيجية المنحنى البارابولي ----------------------
-def generate_signal_using_freqtrade_strategy(df, symbol):
+# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot ----------------------
+def generate_signal_using_hummingbot_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
-    if len(df) < 5:
+    if df.empty:
         return None
 
-    # استخدام استراتيجية المنحنى البارابولي بدلاً من Freqtrade
-    strategy = ParabolicCurveStrategy()
-    df = strategy.populate_indicators(df)
-    df = strategy.populate_buy_trend(df)
-    last_row = df.iloc[-1]
-    # التحقق من وجود إشارة شراء في آخر صف
-    if last_row.get('buy', 0) == 1:
-        current_price = last_row['close']
-        current_atr = last_row['atr']
-        # استخدام مضاعف ATR أكبر نظرًا لطبيعة النمط
-        atr_multiplier = 2.0
-        target = current_price + atr_multiplier * current_atr
-        stop_loss = current_price * 0.98
+    # استخدام السعر الأخير كمرجع
+    current_price = df.iloc[-1]['close']
+    # تحديد نسبة السبريد (مثلاً 0.5%)
+    spread = 0.005
+    # سعر الشراء يكون أقل من السعر الحالي بنسبة السبريد
+    buy_price = current_price * (1 - spread)
+    # سعر البيع يكون أعلى من السعر الحالي بنسبة السبريد
+    sell_price = current_price * (1 + spread)
+    # تحديد وقف الخسارة بنسبة 1% أقل من سعر الشراء
+    stop_loss = buy_price * 0.99
 
-        profit_margin = (target / current_price - 1) * 100
-        if profit_margin < 1:
-            target = current_price * 1.01
-
-        signal = {
+    signal = {
             'symbol': symbol,
-            'price': float(format(current_price, '.8f')),
-            'target': float(format(target, '.8f')),
+            'price': float(format(buy_price, '.8f')),
+            'target': float(format(sell_price, '.8f')),
             'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'parabolic_curve_pattern',
+            'strategy': 'hummingbot_market_making',
             'indicators': {
-                'atr': current_atr,
+                'spread': spread,
+                'reference_price': current_price,
             },
             'trade_value': TRADE_VALUE
         }
-        logger.info(f"تم توليد إشارة من استراتيجية المنحنى البارابولي للزوج {symbol}: {signal}")
-        return signal
-    else:
-        logger.info(f"[{symbol}] الشروط غير مستوفاة في استراتيجية المنحنى البارابولي")
-        return None
+    logger.info(f"تم توليد إشارة من استراتيجية Hummingbot للزوج {symbol}: {signal}")
+    return signal
 
 # ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
@@ -334,10 +274,11 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
         rtl_mark = "\u200F"
         message = (
             f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
-            f"▫️ السعر الحالي: ${signal['price']}\n"
+            f"▫️ السعر المتوقع: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📏 ATR: {signal['indicators'].get('atr', 'N/A')}\n"
+            f"📏 السبريد: {signal['indicators'].get('spread', 'N/A')}\n"
+            f"📊 السعر المرجعي: ${signal['indicators'].get('reference_price', 'N/A')}\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -463,7 +404,6 @@ def track_signals():
                         logger.warning(f"لا يوجد تحديث أسعار لحظة {symbol} من WebSocket")
                         continue
                     logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
-                    # في حال كان سعر الدخول قريب من الصفر نستخدم السعر الحالي بدلًا عنه
                     if abs(entry) < 1e-8:
                         logger.warning(f"سعر الدخول للزوج {symbol} صفر تقريباً، سيتم استخدام السعر الحالي ({current_price}) بدلاً منه.")
                         entry = current_price
@@ -543,8 +483,8 @@ def analyze_market():
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
 
-            # استخدام استراتيجية المنحنى البارابولي لتوليد الإشارة
-            signal = generate_signal_using_freqtrade_strategy(df, symbol)
+            # استخدام استراتيجية Hummingbot لتوليد الإشارة
+            signal = generate_signal_using_hummingbot_strategy(df, symbol)
             if not signal:
                 continue
 
