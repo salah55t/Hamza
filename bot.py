@@ -13,11 +13,6 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-from datetime import datetime, timedelta
-
-# ---------------------- دالة الحصول على الوقت بتوقيت GMT+1 ----------------------
-def get_gmt_plus1_time():
-    return datetime.utcnow() + timedelta(hours=1)
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -42,6 +37,10 @@ logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
 
 # قيمة الصفقة الثابتة للتوصيات
 TRADE_VALUE = 10
+
+# ---------------------- متغيرات التحكم ----------------------
+trade_enabled = False
+last_btc_warning_sent = 0
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -143,37 +142,119 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
-# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot ----------------------
-def generate_signal_using_hummingbot_strategy(df, symbol):
+# ---------------------- تعريف استراتيجية Freqtrade ----------------------
+class FreqtradeStrategy:
+    """
+    استراتيجية Freqtrade لتوليد إشارات التداول باستخدام المؤشرات:
+    - EMA8 و EMA21
+    - مؤشر RSI
+    - بولينجر باند (SMA20 و Upper Band)
+    - ATR لحساب الهدف ووقف الخسارة
+    """
+    stoploss = -0.02
+    minimal_roi = {"0": 0.01}
+
+    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        if len(df) < 50:
+            return df
+        df['ema8'] = calculate_ema(df['close'], 8)
+        df['ema21'] = calculate_ema(df['close'], 21)
+        df['rsi'] = calculate_rsi_indicator(df)
+        df['sma20'] = df['close'].rolling(window=20).mean()
+        df['std20'] = df['close'].rolling(window=20).std()
+        df['upper_band'] = df['sma20'] + (2 * df['std20'])
+        df['lower_band'] = df['sma20'] - (2 * df['std20'])
+        df = calculate_atr_indicator(df)
+        return df
+
+    def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        # شروط الدخول: EMA8 > EMA21، RSI بين 50 و70، والسعر الحالي أكبر من البولنجر العلوي
+        conditions = (df['ema8'] > df['ema21']) & (df['rsi'] >= 50) & (df['rsi'] <= 70) & (df['close'] > df['upper_band'])
+        df.loc[conditions, 'buy'] = 1
+        return df
+
+    def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
+        # شرط خروج مبسط: EMA8 أقل من EMA21 أو RSI أعلى من 70
+        conditions = (df['ema8'] < df['ema21']) | (df['rsi'] > 70)
+        df.loc[conditions, 'sell'] = 1
+        return df
+
+# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Freqtrade ----------------------
+def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
-    if df.empty:
+    if len(df) < 50:
         return None
 
-    # استخدام السعر الأخير كمرجع
-    current_price = df.iloc[-1]['close']
-    # تحديد نسبة السبريد (مثلاً 0.5%)
-    spread = 0.005
-    # سعر الشراء يكون أقل من السعر الحالي بنسبة السبريد
-    buy_price = current_price * (1 - spread)
-    # سعر البيع يكون أعلى من السعر الحالي بنسبة السبريد
-    sell_price = current_price * (1 + spread)
-    # تحديد وقف الخسارة بنسبة 1% أقل من سعر الشراء
-    stop_loss = buy_price * 0.99
+    strategy = FreqtradeStrategy()
+    df = strategy.populate_indicators(df)
+    df = strategy.populate_buy_trend(df)
+    last_row = df.iloc[-1]
+    # التحقق من وجود إشارة شراء في آخر صف
+    if last_row.get('buy', 0) == 1:
+        current_price = last_row['close']
+        current_ema8 = last_row['ema8']
+        current_ema21 = last_row['ema21']
+        current_rsi = last_row['rsi']
+        current_upper_band = last_row['upper_band']
+        current_atr = last_row['atr']
 
-    signal = {
+        # حساب الهدف ووقف الخسارة بناءً على ATR
+        atr_multiplier = 1.5
+        target = current_price + atr_multiplier * current_atr
+        stop_loss = current_price * 0.98
+
+        profit_margin = (target / current_price - 1) * 100
+        if profit_margin < 1:
+            target = current_price * 1.01
+
+        signal = {
             'symbol': symbol,
-            'price': float(format(buy_price, '.8f')),
-            'target': float(format(sell_price, '.8f')),
+            'price': float(format(current_price, '.8f')),
+            'target': float(format(target, '.8f')),
             'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'hummingbot_market_making',
+            'strategy': 'freqtrade_day_trade',
             'indicators': {
-                'spread': spread,
-                'reference_price': current_price,
+                'ema8': current_ema8,
+                'ema21': current_ema21,
+                'rsi': current_rsi,
+                'upper_band': current_upper_band,
+                'atr': current_atr,
             },
             'trade_value': TRADE_VALUE
         }
-    logger.info(f"تم توليد إشارة من استراتيجية Hummingbot للزوج {symbol}: {signal}")
-    return signal
+        logger.info(f"تم توليد إشارة من استراتيجية Freqtrade للزوج {symbol}: {signal}")
+        return signal
+    else:
+        logger.info(f"[{symbol}] الشروط غير مستوفاة في استراتيجية Freqtrade")
+        return None
+
+# ---------------------- تحليل سوق BTCUSDT ----------------------
+def analyze_btc_market():
+    """
+    تحليل زوج BTCUSDT على فريم 4 ساعات باستخدام مؤشرات EMA وRSI.
+    إذا كانت EMA8 >= EMA21 وRSI >= 50 نعتبر أن البتكوين مستقر أو صاعد،
+    وإلا نعتبره في هبوط.
+    """
+    global trade_enabled
+    try:
+        logger.info("بدء تحليل BTCUSDT على فريم 4 ساعات...")
+        # لجمع ما لا يقل عن 50 شمعة: 20 يوم يعطي حوالي 120 شمعة (20*6)
+        df = fetch_historical_data("BTCUSDT", interval='4h', days=20)
+        if df is None or len(df) < 50:
+            logger.warning("بيانات BTCUSDT غير كافية للتحليل")
+            return
+        df['ema8'] = calculate_ema(df['close'], 8)
+        df['ema21'] = calculate_ema(df['close'], 21)
+        df['rsi'] = calculate_rsi_indicator(df)
+        last_row = df.iloc[-1]
+        if last_row['ema8'] >= last_row['ema21'] and last_row['rsi'] >= 50:
+            trade_enabled = True
+            logger.info("تحليل BTCUSDT: البتكوين مستقر أو صاعد.")
+        else:
+            trade_enabled = False
+            logger.info("تحليل BTCUSDT: البتكوين يشير إلى نزول.")
+    except Exception as e:
+        logger.error(f"خطأ في تحليل BTCUSDT: {e}")
 
 # ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
@@ -219,9 +300,12 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='5m', days=3):
+def fetch_historical_data(symbol, interval='4h', days=20):
+    """
+    تعديل: استخدام فريم 4 ساعات وجمع بيانات تاريخية لعدد الأيام المطلوب.
+    """
     try:
-        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol}")
+        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval} لآخر {days} يوم")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -239,10 +323,13 @@ def fetch_historical_data(symbol, interval='5m', days=3):
         return None
 
 def fetch_recent_volume(symbol):
+    """
+    تعديل: جمع حجم السيولة لآخر 4 ساعات بدلاً من 15 دقيقة.
+    """
     try:
-        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
+        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "4 hours ago UTC")
         volume = sum(float(k[5]) for k in klines)
-        logger.info(f"حجم السيولة للزوج {symbol} في آخر 15 دقيقة: {volume:,.2f} USDT")
+        logger.info(f"حجم السيولة للزوج {symbol} في آخر 4 ساعات: {volume:,.2f} USDT")
         return volume
     except Exception as e:
         logger.error(f"خطأ في جلب حجم {symbol}: {e}")
@@ -274,17 +361,16 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
         rtl_mark = "\u200F"
         message = (
             f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
-            f"▫️ السعر المتوقع: ${signal['price']}\n"
+            f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📏 السبريد: {signal['indicators'].get('spread', 'N/A')}\n"
-            f"📊 السعر المرجعي: ${signal['indicators'].get('reference_price', 'N/A')}\n"
-            f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
+            f"📏 ATR: {signal['indicators'].get('atr', 'N/A')}\n"
+            f"💧 السيولة (4 ساعات): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
             f"   - BTC: {btc_dominance:.2f}%\n"
             f"   - ETH: {eth_dominance:.2f}%\n\n"
-            f"⏰ {get_gmt_plus1_time().strftime('%Y-%m-%d %H:%M')}"
+            f"⏰ {time.strftime('%Y-%m-%d %H:%M')}"
         )
         reply_markup = {
             "inline_keyboard": [
@@ -405,8 +491,8 @@ def track_signals():
                         continue
                     logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
                     if abs(entry) < 1e-8:
-                        logger.warning(f"سعر الدخول للزوج {symbol} صفر تقريباً، سيتم استخدام السعر الحالي ({current_price}) بدلاً منه.")
-                        entry = current_price
+                        logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
+                        continue
                     if current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -414,7 +500,7 @@ def track_signals():
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر الخروج: ${current_price:.8f}\n"
                             f"• الربح: +{profit:.2f}%\n"
-                            f"⏱ {get_gmt_plus1_time().strftime('%H:%M:%S')}"
+                            f"⏱ {time.strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
                         try:
@@ -431,7 +517,7 @@ def track_signals():
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر الخروج: ${current_price:.8f}\n"
                             f"• الخسارة: {loss:.2f}%\n"
-                            f"⏱ {get_gmt_plus1_time().strftime('%H:%M:%S')}"
+                            f"⏱ {time.strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
                         try:
@@ -453,7 +539,18 @@ def track_signals():
 
 # ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
+    global last_btc_warning_sent
     logger.info("بدء فحص الأزواج الآن...")
+    # عدم البدء بفحص الأزواج حتى يكون تحليل BTCUSDT قد أعطى إشارة صعود/استقرار
+    if not trade_enabled:
+        now = time.time()
+        if now - last_btc_warning_sent > 600:  # إرسال تحذير مرة كل 10 دقائق
+            warning_message = "⚠️ **تحذير:** مؤشر BTCUSDT يشير إلى نزول. لن يتم فحص الأزواج الجديدة حاليًا، وسيتم الاكتفاء بتتبع التوصيات المفتوحة فقط."
+            send_telegram_alert_special(warning_message)
+            last_btc_warning_sent = now
+        logger.info("سوق BTCUSDT في حالة هبوط؛ لن يتم البحث عن توصيات جديدة.")
+        return
+
     check_db_connection()
     
     cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
@@ -474,22 +571,22 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)
+            df = fetch_historical_data(symbol)  # سيستخدم الفريم الافتراضي '4h' والأيام 20
             if df is None or len(df) < 100:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
-            volume_15m = fetch_recent_volume(symbol)
-            if volume_15m < 40000:
-                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
+            volume_4h = fetch_recent_volume(symbol)
+            if volume_4h < 640000:
+                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_4h:,.2f}")
                 continue
 
-            # استخدام استراتيجية Hummingbot لتوليد الإشارة
-            signal = generate_signal_using_hummingbot_strategy(df, symbol)
+            # استخدام استراتيجية Freqtrade لتوليد الإشارة
+            signal = generate_signal_using_freqtrade_strategy(df, symbol)
             if not signal:
                 continue
 
             logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
-            send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
+            send_telegram_alert(signal, volume_4h, btc_dominance, eth_dominance)
             try:
                 cur.execute("""
                     INSERT INTO signals 
@@ -501,7 +598,7 @@ def analyze_market():
                     signal['target'],
                     signal['stop_loss'],
                     signal.get('confidence', 100),
-                    volume_15m
+                    volume_4h
                 ))
                 conn.commit()
                 logger.info(f"تم إدخال الإشارة بنجاح للزوج {symbol}")
@@ -538,8 +635,14 @@ if __name__ == '__main__':
     test_telegram()
     logger.info("✅ تم بدء التشغيل بنجاح!")
     
+    # إجراء تحليل أولي لـ BTCUSDT قبل البدء بفحص الأزواج
+    analyze_btc_market()
+    
     scheduler = BackgroundScheduler()
+    # فحص توصيات الأزواج يتم فقط إذا كانت BTCUSDT مؤيدة، ويتم تكراره كل 5 دقائق
     scheduler.add_job(analyze_market, 'interval', minutes=5)
+    # إعادة فحص BTCUSDT كل 10 دقائق لتحديث حالة السوق
+    scheduler.add_job(analyze_btc_market, 'interval', minutes=10)
     scheduler.start()
     
     try:
