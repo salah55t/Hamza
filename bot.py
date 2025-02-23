@@ -36,7 +36,7 @@ db_url = config('DATABASE_URL')
 # تعيين المنطقة الزمنية
 timezone = pytz.timezone('Asia/Riyadh')
 
-# قيمة الصفقة الثابتة للتوصيات
+# قيمة الصفقة الثابتة للتوصيات (بـ USDT)
 TRADE_VALUE = 10
 
 # ---------------------- متغيرات التحكم ----------------------
@@ -248,7 +248,7 @@ def generate_signal_using_day_trading_strategy(df, symbol):
         reward = target - current_price
         risk_reward_ratio = reward / risk if risk > 0 else 0
 
-        if risk_reward_ratio < 2.5 or reward / current_price < 0.025:  # رفع الحد الأدنى للدقة
+        if risk_reward_ratio < 2.5 or reward / current_price < 0.025:
             logger.info(f"{symbol}: تجاهل الإشارة - RR < 2.5 أو الربح < 2.5%")
             return None
 
@@ -269,7 +269,7 @@ def generate_signal_using_day_trading_strategy(df, symbol):
                 'macd_signal': last_row['macd_signal'],
                 'resistance': resistance,
                 'support': support,
-                '%K': last_row['%K'],  # إضافة Stochastic
+                '%K': last_row['%K'],
                 '%D': last_row['%D']
             },
             'trade_value': TRADE_VALUE,
@@ -304,21 +304,122 @@ def webhook():
     return '', 200
 
 def send_report(chat_id_callback):
-    # هنا يمكنك إضافة منطق إرسال التقرير إذا لزم الأمر
-    pass
-
-def set_telegram_webhook():
-    webhook_url = "https://hamza-1.onrender.com/webhook"
-    url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
+    """
+    توليد تقرير شامل يحتوي على:
+      - الصفقات الرابحة (achieved_target = TRUE) مع حساب نسبة الربح والمبلغ المحقق
+      - الصفقات الخاسرة (hit_stop_loss = TRUE) مع حساب نسبة الخسارة والمبلغ المحقق
+      - الصفقات المفتوحة (closed_at IS NULL)
+    """
     try:
-        response = requests.get(url, timeout=10)
-        res_json = response.json()
-        if res_json.get("ok"):
-            logger.info(f"تم تسجيل webhook بنجاح: {res_json}")
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # الصفقات الرابحة
+        cur.execute("""
+            SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
+            FROM signals 
+            WHERE achieved_target = TRUE
+            ORDER BY sent_at DESC
+            LIMIT 10
+        """)
+        winning_trades = cur.fetchall()
+        
+        # الصفقات الخاسرة
+        cur.execute("""
+            SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
+            FROM signals 
+            WHERE hit_stop_loss = TRUE
+            ORDER BY sent_at DESC
+            LIMIT 10
+        """)
+        losing_trades = cur.fetchall()
+        
+        # الصفقات المفتوحة
+        cur.execute("""
+            SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at 
+            FROM signals 
+            WHERE closed_at IS NULL
+            ORDER BY sent_at DESC
+            LIMIT 10
+        """)
+        open_trades = cur.fetchall()
+        release_db_connection(conn)
+        
+        report_message = "📊 **تقرير شامل للصفقات**\n\n"
+        
+        # قسم الصفقات الرابحة مع حساب الربح
+        report_message += "🏆 **الصفقات الرابحة:**\n"
+        if winning_trades:
+            for trade in winning_trades:
+                symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
+                sent_at_str = sent_at.strftime('%Y-%m-%d %H:%M')
+                closed_at_str = closed_at.strftime('%Y-%m-%d %H:%M') if closed_at else "غير محدد"
+                profit_percentage = ((target / entry) - 1) * 100
+                profit_amount = TRADE_VALUE * ((target / entry) - 1)
+                report_message += (
+                    f"• **{symbol}**\n"
+                    f"  - الدخول: ${entry:.8f}\n"
+                    f"  - الهدف: ${target:.8f}\n"
+                    f"  - وقف الخسارة: ${stop_loss:.8f}\n"
+                    f"  - نسبة الربح: {profit_percentage:.2f}%\n"
+                    f"  - الربح المحقق: ${profit_amount:.2f}\n"
+                    f"  - تم الإغلاق: {closed_at_str}\n"
+                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                )
         else:
-            logger.error(f"فشل تسجيل webhook: {res_json}")
+            report_message += "لا توجد صفقات رابحة.\n\n"
+        
+        # قسم الصفقات الخاسرة مع حساب الخسارة
+        report_message += "❌ **الصفقات الخاسرة:**\n"
+        if losing_trades:
+            for trade in losing_trades:
+                symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
+                sent_at_str = sent_at.strftime('%Y-%m-%d %H:%M')
+                closed_at_str = closed_at.strftime('%Y-%m-%d %H:%M') if closed_at else "غير محدد"
+                loss_percentage = abs(((stop_loss / entry) - 1) * 100)
+                loss_amount = TRADE_VALUE * abs(((stop_loss / entry) - 1))
+                report_message += (
+                    f"• **{symbol}**\n"
+                    f"  - الدخول: ${entry:.8f}\n"
+                    f"  - وقف الخسارة: ${stop_loss:.8f}\n"
+                    f"  - نسبة الخسارة: {loss_percentage:.2f}%\n"
+                    f"  - الخسارة المحققة: ${loss_amount:.2f}\n"
+                    f"  - تم الإغلاق: {closed_at_str}\n"
+                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                )
+        else:
+            report_message += "لا توجد صفقات خاسرة.\n\n"
+        
+        # قسم الصفقات المفتوحة
+        report_message += "⏳ **الصفقات المفتوحة:**\n"
+        if open_trades:
+            for trade in open_trades:
+                symbol, entry, target, stop_loss, dyn_stop, sent_at = trade
+                sent_at_str = sent_at.strftime('%Y-%m-%d %H:%M')
+                report_message += (
+                    f"• **{symbol}**\n"
+                    f"  - الدخول: ${entry:.8f}\n"
+                    f"  - الهدف: ${target:.8f}\n"
+                    f"  - وقف الخسارة: ${stop_loss:.8f}\n"
+                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                )
+        else:
+            report_message += "لا توجد صفقات مفتوحة.\n\n"
+        
+        # إرسال التقرير عبر Telegram
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            "chat_id": chat_id_callback,
+            "text": report_message,
+            "parse_mode": "Markdown"
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code == 200:
+            logger.info("تم إرسال التقرير الشامل بنجاح")
+        else:
+            logger.error(f"فشل إرسال التقرير: {response.text}")
     except Exception as e:
-        logger.error(f"استثناء أثناء تسجيل webhook: {e}")
+        logger.error(f"خطأ في إرسال التقرير: {e}")
 
 # ---------------------- وظائف تحليل البيانات ----------------------
 def get_crypto_symbols():
@@ -329,7 +430,7 @@ def get_crypto_symbols():
         filtered_symbols = []
         for symbol in symbols:
             volume = fetch_recent_volume(symbol)
-            if volume > 100000:  # حد أدنى للسيولة
+            if volume > 100000:
                 filtered_symbols.append(symbol)
         logger.info(f"تم جلب {len(filtered_symbols)} زوج بعد الفلترة")
         return filtered_symbols
@@ -346,8 +447,8 @@ def fetch_historical_data(symbol, interval='5m', days=3):
         try:
             klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
             df = pd.DataFrame(klines, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 
-                                              'close_time', 'quote_volume', 'trades', 'taker_buy_base', 
-                                              'taker_buy_quote', 'ignore'])
+                                                 'close_time', 'quote_volume', 'trades', 'taker_buy_base', 
+                                                 'taker_buy_quote', 'ignore'])
             df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].astype(float)
             historical_data_cache[cache_key] = df
             logger.info(f"تم جلب {len(df)} صف من بيانات {symbol}")
@@ -399,7 +500,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"   - RSI: {signal['indicators']['rsi']:.2f}\n"
             f"   - VWAP: ${signal['indicators']['vwap']:.4f}\n"
             f"   - ATR: {signal['indicators']['atr']:.8f}\n"
-            f"   - Stochastic %K: {signal['indicators']['%K']:.2f}\n"  # إضافة Stochastic
+            f"   - Stochastic %K: {signal['indicators']['%K']:.2f}\n"
             f"   - Stochastic %D: {signal['indicators']['%D']:.2f}\n"
             f"💧 **السيولة (15 دق)**: {volume:,.2f} USDT\n"
             f"💵 **قيمة الصفقة**: ${TRADE_VALUE}\n\n"
@@ -509,7 +610,7 @@ def track_signals():
             conn.rollback()
         finally:
             release_db_connection(conn)
-        time.sleep(120)  # زيادة الفاصل الزمني
+        time.sleep(120)
 
 # ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
@@ -553,7 +654,17 @@ def analyze_market():
 # ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
     init_db()
-    set_telegram_webhook()
+    set_telegram_webhook_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url=https://hamza-1.onrender.com/webhook"
+    try:
+        response = requests.get(set_telegram_webhook_url, timeout=10)
+        res_json = response.json()
+        if res_json.get("ok"):
+            logger.info(f"تم تسجيل webhook بنجاح: {res_json}")
+        else:
+            logger.error(f"فشل تسجيل webhook: {res_json}")
+    except Exception as e:
+        logger.error(f"استثناء أثناء تسجيل webhook: {e}")
+    
     Thread(target=run_flask, daemon=True).start()
     Thread(target=track_signals, daemon=True).start()
     Thread(target=run_ticker_socket_manager, daemon=True).start()
