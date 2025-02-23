@@ -122,9 +122,10 @@ def handle_ticker_message(msg):
         logger.error(f"خطأ في handle_ticker_message: {e}")
 
 def run_ticker_socket_manager():
-    twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
     while True:
         try:
+            # إنشاء كائن جديد في كل محاولة لضمان الاستقرار عند حدوث خطأ
+            twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
             twm.start()
             twm.start_miniticker_socket(callback=handle_ticker_message)
             logger.info("تم تشغيل WebSocket لتحديث التيكر")
@@ -144,6 +145,8 @@ def calculate_rsi_indicator(df, period=7):
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=period, min_periods=period).mean()
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    # معالجة حالة avg_loss = 0 لتفادي القسمة على صفر
+    avg_loss = avg_loss.replace(0, 1e-10)
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
     return rsi
@@ -211,7 +214,7 @@ class DayTradingStrategy:
             (df['ema5'] < df['ema13']) |
             (df['rsi'] > 70) |
             (df['macd'] < df['macd_signal']) |
-            (df['%K'] < df['%D']) & (df['%K'] > 20)  # شرط Stochastic
+            (((df['%K'] < df['%D']) & (df['%K'] > 20)))  # شرط Stochastic مع تجميع الشروط
         )
         df.loc[conditions, 'sell'] = 1
         return df
@@ -452,8 +455,8 @@ def send_telegram_alert_special(message):
 def track_signals():
     logger.info("بدء خدمة تتبع الإشارات")
     while True:
+        conn = get_db_connection()
         try:
-            conn = get_db_connection()
             cur = conn.cursor()
             cur.execute("""
                 SELECT id, symbol, entry_price, target, stop_loss, dynamic_stop_loss 
@@ -501,11 +504,12 @@ def track_signals():
                     send_telegram_alert_special(msg)
                     cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
                     conn.commit()
-            release_db_connection(conn)
-            time.sleep(120)  # زيادة الفاصل الزمني
         except Exception as e:
             logger.error(f"خطأ في تتبع الإشارات: {e}")
-            time.sleep(120)
+            conn.rollback()
+        finally:
+            release_db_connection(conn)
+        time.sleep(120)  # زيادة الفاصل الزمني
 
 # ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
