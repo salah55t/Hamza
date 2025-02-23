@@ -231,15 +231,15 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
 # ---------------------- تحليل سوق BTCUSDT ----------------------
 def analyze_btc_market():
     """
-    تحليل زوج BTCUSDT على فريم 4 ساعات باستخدام مؤشرات EMA وRSI.
+    تحليل زوج BTCUSDT على فريم الساعة باستخدام مؤشرات EMA وRSI.
     إذا كانت EMA8 >= EMA21 وRSI >= 50 نعتبر أن البتكوين مستقر أو صاعد،
     وإلا نعتبره في هبوط.
     """
     global trade_enabled
     try:
-        logger.info("بدء تحليل BTCUSDT على فريم 4 ساعات...")
-        # لجمع ما لا يقل عن 50 شمعة: 20 يوم يعطي حوالي 120 شمعة (20*6)
-        df = fetch_historical_data("BTCUSDT", interval='4h', days=20)
+        logger.info("بدء تحليل BTCUSDT على فريم الساعة...")
+        # لجمع ما لا يقل عن 50 شمعة: 3 أيام يعطي حوالي 72 شمعة (3*24)
+        df = fetch_historical_data("BTCUSDT", interval='1h', days=3)
         if df is None or len(df) < 50:
             logger.warning("بيانات BTCUSDT غير كافية للتحليل")
             return
@@ -300,9 +300,9 @@ def get_crypto_symbols():
         logger.error(f"خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='4h', days=20):
+def fetch_historical_data(symbol, interval='1h', days=3):
     """
-    تعديل: استخدام فريم 4 ساعات وجمع بيانات تاريخية لعدد الأيام المطلوب.
+    جمع البيانات التاريخية باستخدام فريم الساعة ولعدد الأيام المحدد.
     """
     try:
         logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} بفريم {interval} لآخر {days} يوم")
@@ -324,12 +324,12 @@ def fetch_historical_data(symbol, interval='4h', days=20):
 
 def fetch_recent_volume(symbol):
     """
-    تعديل: جمع حجم السيولة لآخر 4 ساعات بدلاً من 15 دقيقة.
+    جمع حجم السيولة لآخر ساعة.
     """
     try:
-        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "4 hours ago UTC")
+        klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "1 hour ago UTC")
         volume = sum(float(k[5]) for k in klines)
-        logger.info(f"حجم السيولة للزوج {symbol} في آخر 4 ساعات: {volume:,.2f} USDT")
+        logger.info(f"حجم السيولة للزوج {symbol} في آخر 1 ساعة: {volume:,.2f} USDT")
         return volume
     except Exception as e:
         logger.error(f"خطأ في جلب حجم {symbol}: {e}")
@@ -365,9 +365,9 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
             f"📏 ATR: {signal['indicators'].get('atr', 'N/A')}\n"
-            f"💧 السيولة (4 ساعات): {volume:,.2f} USDT\n"
+            f"💧 السيولة (1 ساعة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
-            f"📈 **نسب السيطرة على السوق (4H):**\n"
+            f"📈 **نسب السيطرة على السوق (1H):**\n"
             f"   - BTC: {btc_dominance:.2f}%\n"
             f"   - ETH: {eth_dominance:.2f}%\n\n"
             f"⏰ {time.strftime('%Y-%m-%d %H:%M')}"
@@ -571,13 +571,14 @@ def analyze_market():
     for symbol in symbols:
         logger.info(f"بدء فحص الزوج: {symbol}")
         try:
-            df = fetch_historical_data(symbol)  # سيستخدم الفريم الافتراضي '4h' والأيام 20
-            if df is None or len(df) < 100:
+            df = fetch_historical_data(symbol)  # سيستخدم الفريم الافتراضي '1h' والأيام 3
+            if df is None or len(df) < 50:
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
-            volume_4h = fetch_recent_volume(symbol)
-            if volume_4h < 640000:
-                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_4h:,.2f}")
+            volume_1h = fetch_recent_volume(symbol)
+            # شرط السيولة لآخر ساعة، يمكن تعديله حسب الحاجة
+            if volume_1h < 160000:
+                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_1h:,.2f}")
                 continue
 
             # استخدام استراتيجية Freqtrade لتوليد الإشارة
@@ -586,7 +587,7 @@ def analyze_market():
                 continue
 
             logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
-            send_telegram_alert(signal, volume_4h, btc_dominance, eth_dominance)
+            send_telegram_alert(signal, volume_1h, btc_dominance, eth_dominance)
             try:
                 cur.execute("""
                     INSERT INTO signals 
@@ -598,7 +599,7 @@ def analyze_market():
                     signal['target'],
                     signal['stop_loss'],
                     signal.get('confidence', 100),
-                    volume_4h
+                    volume_1h
                 ))
                 conn.commit()
                 logger.info(f"تم إدخال الإشارة بنجاح للزوج {symbol}")
