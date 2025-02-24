@@ -18,10 +18,10 @@ import pytz
 from datetime import datetime
 from cachetools import TTLCache
 
-# ---------------------- إعدادات التسجيل ----------------------
+# ---------------------- إعدادات التسجيل المحسنة ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',  # إضافة اسم الدالة للسجل
     handlers=[logging.FileHandler('crypto_bot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
@@ -136,6 +136,7 @@ def run_ticker_socket_manager():
 # ---------------------- دوال حساب المؤشرات الفنية ----------------------
 def calculate_ema(series, span):
     ema = series.ewm(span=span, adjust=False).mean()
+    logger.debug(f"حساب EMA بطول {span}: {ema.iloc[-1]:.4f}")
     return ema
 
 def calculate_rsi_indicator(df, period=7):
@@ -147,6 +148,7 @@ def calculate_rsi_indicator(df, period=7):
     avg_loss = avg_loss.replace(0, 1e-10)
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
+    logger.debug(f"حساب RSI ({period}): {rsi.iloc[-1]:.2f}")
     return rsi
 
 def calculate_atr_indicator(df, period=7):
@@ -155,6 +157,7 @@ def calculate_atr_indicator(df, period=7):
     low_close = (df['low'] - df['close'].shift(1)).abs()
     df['tr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = df['tr'].rolling(window=period).mean()
+    logger.debug(f"حساب ATR ({period}): {df['atr'].iloc[-1]:.8f}")
     return df
 
 def calculate_macd_indicator(df, fast=12, slow=26, signal=9):
@@ -164,6 +167,7 @@ def calculate_macd_indicator(df, fast=12, slow=26, signal=9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     df['macd'] = macd
     df['macd_signal'] = signal_line
+    logger.debug(f"حساب MACD: {macd.iloc[-1]:.4f}, Signal: {signal_line.iloc[-1]:.4f}")
     return df
 
 def calculate_stochastic(df, k_period=14, d_period=3):
@@ -171,6 +175,7 @@ def calculate_stochastic(df, k_period=14, d_period=3):
     highest_high = df['high'].rolling(window=k_period).max()
     df['%K'] = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low))
     df['%D'] = df['%K'].rolling(window=d_period).mean()
+    logger.debug(f"حساب Stochastic: %K={df['%K'].iloc[-1]:.2f}, %D={df['%D'].iloc[-1]:.2f}")
     return df
 
 # ---------------------- تعريف استراتيجية محسّنة للتداول اليومي ----------------------
@@ -191,6 +196,7 @@ class DayTradingStrategy:
         df = calculate_stochastic(df)
         df['resistance'] = df['high'].rolling(window=20).max()
         df['support'] = df['low'].rolling(window=20).min()
+        logger.info(f"تم حساب المؤشرات لـ {len(df)} صف")
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -203,6 +209,7 @@ class DayTradingStrategy:
             (df['volume'] > df['volume'].rolling(window=10).mean())  # تقليل شرط الحجم
         )
         df.loc[conditions, 'buy'] = 1
+        logger.debug(f"شروط الشراء: {conditions.iloc[-1]}")
         return df
 
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -213,6 +220,7 @@ class DayTradingStrategy:
             (df['%K'] < df['%D'])  # تبسيط شرط Stochastic
         )
         df.loc[conditions, 'sell'] = 1
+        logger.debug(f"شروط البيع: {conditions.iloc[-1]}")
         return df
 
 # ---------------------- دالة توليد الإشارة المحسنة للتداول اليومي ----------------------
@@ -244,8 +252,23 @@ def generate_signal_using_day_trading_strategy(df, symbol):
         reward = target - current_price
         risk_reward_ratio = reward / risk if risk > 0 else 0
 
-        if risk_reward_ratio < 1.5 or reward / current_price < 0.01:  # تخفيف الشروط
-            logger.info(f"{symbol}: تجاهل الإشارة - RR < 1.5 أو الربح < 1%")
+        # تسجيل المؤشرات مع تفاصيل
+        logger.info(
+            f"{symbol} - المؤشرات: "
+            f"EMA5={last_row['ema5']:.4f}, EMA13={last_row['ema13']:.4f}, "
+            f"RSI={last_row['rsi']:.2f}, VWAP={last_row['vwap']:.4f}, "
+            f"ATR={atr:.8f}, MACD={last_row['macd']:.4f}, "
+            f"MACD Signal={last_row['macd_signal']:.4f}, "
+            f"%K={last_row['%K']:.2f}, %D={last_row['%D']:.2f}, "
+            f"Resistance={resistance:.4f}, Support={support:.4f}"
+        )
+
+        # التحقق من أسباب الرفض
+        if risk_reward_ratio < 1.5:
+            logger.info(f"{symbol}: تم رفض التوصية - نسبة المخاطرة/العائد ({risk_reward_ratio:.2f}) < 1.5")
+            return None
+        if reward / current_price < 0.01:
+            logger.info(f"{symbol}: تم رفض التوصية - الربح المتوقع ({reward / current_price:.4f}) < 1%")
             return None
 
         signal = {
@@ -271,8 +294,10 @@ def generate_signal_using_day_trading_strategy(df, symbol):
             'trade_value': TRADE_VALUE,
             'risk_reward_ratio': risk_reward_ratio
         }
-        logger.info(f"تم توليد إشارة تداول يومي لـ {symbol}")
+        logger.info(f"تم توليد إشارة تداول يومي لـ {symbol} بنجاح")
         return signal
+    else:
+        logger.info(f"{symbol}: لا توجد إشارة شراء - شروط التوصية غير مستوفاة")
     return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -332,9 +357,12 @@ def send_report(chat_id_callback):
         open_trades = cur.fetchall()
         release_db_connection(conn)
         
-        report_message = "📊 **تقرير شامل للصفقات**\n\n"
+        report_message = (
+            "📊✨ **تقرير أداء التداول الشامل** ✨📊\n"
+            f"🕒 محدث بتاريخ: {datetime.now(timezone).strftime('%Y-%m-%d %H:%M')}\n\n"
+        )
         
-        report_message += "🏆 **الصفقات الرابحة:**\n"
+        report_message += "🏆 **الصفقات الرابحة** 🏆\n"
         if winning_trades:
             for trade in winning_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
@@ -343,19 +371,20 @@ def send_report(chat_id_callback):
                 profit_percentage = ((target / entry) - 1) * 100
                 profit_amount = TRADE_VALUE * ((target / entry) - 1)
                 report_message += (
-                    f"• **{symbol}**\n"
-                    f"  - الدخول: ${entry:.8f}\n"
+                    f"🌟 **{symbol}**\n"
+                    f"  - سعر الدخول: ${entry:.8f}\n"
                     f"  - الهدف: ${target:.8f}\n"
                     f"  - وقف الخسارة: ${stop_loss:.8f}\n"
-                    f"  - نسبة الربح: {profit_percentage:.2f}%\n"
-                    f"  - الربح المحقق: ${profit_amount:.2f}\n"
-                    f"  - تم الإغلاق: {closed_at_str}\n"
-                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                    f"  - نسبة الربح: **+{profit_percentage:.2f}%**\n"
+                    f"  - الربح المحقق: **${profit_amount:.2f}**\n"
+                    f"  - تاريخ الإغلاق: {closed_at_str}\n"
+                    f"  - تاريخ الإرسال: {sent_at_str}\n"
+                    "----------------------------------------\n"
                 )
         else:
-            report_message += "لا توجد صفقات رابحة.\n\n"
+            report_message += "🤷‍♂️ لا توجد صفقات رابحة بعد.\n\n"
         
-        report_message += "❌ **الصفقات الخاسرة:**\n"
+        report_message += "❌ **الصفقات الخاسرة** ❌\n"
         if losing_trades:
             for trade in losing_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
@@ -364,31 +393,33 @@ def send_report(chat_id_callback):
                 loss_percentage = abs(((stop_loss / entry) - 1) * 100)
                 loss_amount = TRADE_VALUE * abs(((stop_loss / entry) - 1))
                 report_message += (
-                    f"• **{symbol}**\n"
-                    f"  - الدخول: ${entry:.8f}\n"
+                    f"🔴 **{symbol}**\n"
+                    f"  - سعر الدخول: ${entry:.8f}\n"
                     f"  - وقف الخسارة: ${stop_loss:.8f}\n"
-                    f"  - نسبة الخسارة: {loss_percentage:.2f}%\n"
-                    f"  - الخسارة المحققة: ${loss_amount:.2f}\n"
-                    f"  - تم الإغلاق: {closed_at_str}\n"
-                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                    f"  - نسبة الخسارة: **-{loss_percentage:.2f}%**\n"
+                    f"  - الخسارة: **${loss_amount:.2f}**\n"
+                    f"  - تاريخ الإغلاق: {closed_at_str}\n"
+                    f"  - تاريخ الإرسال: {sent_at_str}\n"
+                    "----------------------------------------\n"
                 )
         else:
-            report_message += "لا توجد صفقات خاسرة.\n\n"
+            report_message += "✅ لا توجد صفقات خاسرة بعد.\n\n"
         
-        report_message += "⏳ **الصفقات المفتوحة:**\n"
+        report_message += "⏳ **الصفقات المفتوحة** ⏳\n"
         if open_trades:
             for trade in open_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at = trade
                 sent_at_str = sent_at.strftime('%Y-%m-%d %H:%M')
                 report_message += (
-                    f"• **{symbol}**\n"
-                    f"  - الدخول: ${entry:.8f}\n"
+                    f"⏰ **{symbol}**\n"
+                    f"  - سعر الدخول: ${entry:.8f}\n"
                     f"  - الهدف: ${target:.8f}\n"
                     f"  - وقف الخسارة: ${stop_loss:.8f}\n"
-                    f"  - وقت الإرسال: {sent_at_str}\n\n"
+                    f"  - تاريخ الإرسال: {sent_at_str}\n"
+                    "----------------------------------------\n"
                 )
         else:
-            report_message += "لا توجد صفقات مفتوحة.\n\n"
+            report_message += "🕒 لا توجد صفقات مفتوحة حالياً.\n\n"
         
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
@@ -465,35 +496,38 @@ def get_market_dominance():
         logger.error(f"خطأ في get_market_dominance: {e}")
         return None, None
 
-# ---------------------- إرسال التنبيهات عبر Telegram ----------------------
+# ---------------------- إرسال التنبيهات عبر Telegram بتصميم محسن ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
         loss = round((signal['stop_loss'] / signal['price'] - 1) * 100, 2)
         rtl_mark = "\u200F"
         message = (
-            f"{rtl_mark}🚀 **إشارة تداول يومي - {signal['symbol']}**\n\n"
-            f"📌 **سعر الدخول**: ${signal['price']}\n"
-            f"🎯 **الهدف**: ${signal['target']} (+{profit}%)\n"
-            f"🛑 **وقف الخسارة الأولي**: ${signal['stop_loss']} ({loss}%)\n"
+            f"{rtl_mark}🌟 **توصية تداول ذهبية - {signal['symbol']}** 🌟\n"
+            "----------------------------------------\n"
+            f"💰 **سعر الدخول**: ${signal['price']}\n"
+            f"🎯 **الهدف المتوقع**: ${signal['target']} (**+{profit}%**)\n"
+            f"🛑 **وقف الخسارة**: ${signal['stop_loss']} (**{loss}%**)\n"
             f"🔄 **وقف الخسارة المتحرك**: ${signal['dynamic_stop_loss']}\n"
-            f"📊 **نسبة المخاطرة/العائد**: {signal['risk_reward_ratio']:.2f}\n"
-            f"💡 **المؤشرات الرئيسية**:\n"
-            f"   - RSI: {signal['indicators']['rsi']:.2f}\n"
-            f"   - VWAP: ${signal['indicators']['vwap']:.4f}\n"
-            f"   - ATR: {signal['indicators']['atr']:.8f}\n"
-            f"   - Stochastic %K: {signal['indicators']['%K']:.2f}\n"
-            f"   - Stochastic %D: {signal['indicators']['%D']:.2f}\n"
-            f"💧 **السيولة (15 دق)**: {volume:,.2f} USDT\n"
-            f"💵 **قيمة الصفقة**: ${TRADE_VALUE}\n\n"
-            f"📈 **نسب السيطرة (4H):**\n"
-            f"   - BTC: {btc_dominance:.2f}%\n"
-            f"   - ETH: {eth_dominance:.2f}%\n"
-            f"⏰ {datetime.now(timezone).strftime('%Y-%m-%d %H:%M')}"
+            f"⚖️ **نسبة المخاطرة/العائد**: **{signal['risk_reward_ratio']:.2f}**\n"
+            "----------------------------------------\n"
+            f"📈 **تحليل المؤشرات**:\n"
+            f"   • RSI: **{signal['indicators']['rsi']:.2f}**\n"
+            f"   • VWAP: **${signal['indicators']['vwap']:.4f}**\n"
+            f"   • ATR: **{signal['indicators']['atr']:.8f}**\n"
+            f"   • Stochastic %K: **{signal['indicators']['%K']:.2f}**\n"
+            f"   • Stochastic %D: **{signal['indicators']['%D']:.2f}**\n"
+            "----------------------------------------\n"
+            f"💧 **السيولة (15 دق)**: **{volume:,.2f} USDT**\n"
+            f"💵 **قيمة الصفقة**: **${TRADE_VALUE}**\n"
+            f"📊 **نسب السيطرة على السوق**:\n"
+            f"   • BTC: **{btc_dominance:.2f}%**\n"
+            f"   • ETH: **{eth_dominance:.2f}%**\n"
+            f"⏰ **وقت التوصية**: {datetime.now(timezone).strftime('%Y-%m-%d %H:%M')}"
         )
         reply_markup = {
             "inline_keyboard": [
-                [{"text": "عرض التقرير", "callback_data": "get_report"}]
+                [{"text": "📊 عرض التقرير الشامل", "callback_data": "get_report"}]
             ]
         }
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
@@ -507,14 +541,14 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             try:
                 response = requests.post(url, json=payload, timeout=10)
                 if response.status_code == 200:
-                    logger.info(f"تم إرسال إشعار لـ {signal['symbol']} بنجاح")
+                    logger.info(f"تم إرسال توصية لـ {signal['symbol']} بنجاح")
                     return
                 else:
-                    logger.error(f"فشل إرسال الإشعار: {response.text}")
+                    logger.error(f"فشل إرسال التوصية: {response.text}")
             except Exception as e:
-                logger.error(f"فشل إرسال إشعار لـ {signal['symbol']} (محاولة {attempt+1}): {e}")
+                logger.error(f"فشل إرسال توصية لـ {signal['symbol']} (محاولة {attempt+1}): {e}")
                 time.sleep(2 ** attempt)
-        logger.error(f"فشل إرسال إشعار لـ {signal['symbol']} بعد 3 محاولات")
+        logger.error(f"فشل إرسال توصية لـ {signal['symbol']} بعد 3 محاولات")
     except Exception as e:
         logger.error(f"خطأ في send_telegram_alert: {e}")
 
@@ -561,16 +595,18 @@ def track_signals():
                     if new_dynamic_stop_loss != dynamic_stop_loss:
                         cur.execute("UPDATE signals SET dynamic_stop_loss = %s WHERE id = %s", (new_dynamic_stop_loss, signal_id))
                         conn.commit()
+                        logger.info(f"{symbol}: تحديث وقف الخسارة المتحرك إلى {new_dynamic_stop_loss:.8f}")
                 else:
                     new_dynamic_stop_loss = stop_loss
                 if current_price >= target:
                     profit = ((current_price - entry) / entry) * 100
                     msg = (
-                        f"🎉 **تحقيق الهدف - {symbol}**\n"
-                        f"• الدخول: ${entry:.8f}\n"
-                        f"• الخروج: ${current_price:.8f}\n"
-                        f"• الربح: +{profit:.2f}%\n"
-                        f"⏱ {datetime.now(timezone).strftime('%H:%M:%S')}"
+                        f"🎉✨ **نجاح كبير! تحقيق الهدف - {symbol}** ✨🎉\n"
+                        "----------------------------------------\n"
+                        f"💰 الدخول: **${entry:.8f}**\n"
+                        f"✅ الخروج: **${current_price:.8f}**\n"
+                        f"📈 الربح المحقق: **+{profit:.2f}%**\n"
+                        f"⏰ الوقت: {datetime.now(timezone).strftime('%H:%M:%S')}"
                     )
                     send_telegram_alert_special(msg)
                     cur.execute("UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
@@ -578,11 +614,12 @@ def track_signals():
                 elif current_price <= new_dynamic_stop_loss:
                     loss = ((current_price - entry) / entry) * 100
                     msg = (
-                        f"🔴 **تفعيل وقف الخسارة - {symbol}**\n"
-                        f"• الدخول: ${entry:.8f}\n"
-                        f"• الخروج: ${current_price:.8f}\n"
-                        f"• الخسارة: {loss:.2f}%\n"
-                        f"⏱ {datetime.now(timezone).strftime('%H:%M:%S')}"
+                        f"⚠️🔴 **تنبيه: تفعيل وقف الخسارة - {symbol}** 🔴⚠️\n"
+                        "----------------------------------------\n"
+                        f"💰 الدخول: **${entry:.8f}**\n"
+                        f"❌ الخروج: **${current_price:.8f}**\n"
+                        f"📉 الخسارة: **{loss:.2f}%**\n"
+                        f"⏰ الوقت: {datetime.now(timezone).strftime('%H:%M:%S')}"
                     )
                     send_telegram_alert_special(msg)
                     cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
@@ -612,6 +649,7 @@ def analyze_market():
                 continue
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 50000:  # تقليل الحد الأدنى للسيولة
+                logger.info(f"{symbol}: تم رفض التوصية - السيولة ({volume_15m:,.2f} USDT) أقل من 50000")
                 continue
             signal = generate_signal_using_day_trading_strategy(df, symbol)
             if signal:
