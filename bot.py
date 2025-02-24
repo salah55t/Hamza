@@ -124,7 +124,6 @@ def handle_ticker_message(msg):
 def run_ticker_socket_manager():
     while True:
         try:
-            # إنشاء كائن جديد في كل محاولة لضمان الاستقرار عند حدوث خطأ
             twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
             twm.start()
             twm.start_miniticker_socket(callback=handle_ticker_message)
@@ -145,7 +144,6 @@ def calculate_rsi_indicator(df, period=7):
     loss = -delta.clip(upper=0)
     avg_gain = gain.rolling(window=period, min_periods=period).mean()
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    # معالجة حالة avg_loss = 0 لتفادي القسمة على صفر
     avg_loss = avg_loss.replace(0, 1e-10)
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
@@ -169,7 +167,6 @@ def calculate_macd_indicator(df, fast=12, slow=26, signal=9):
     return df
 
 def calculate_stochastic(df, k_period=14, d_period=3):
-    """حساب مؤشر Stochastic Oscillator"""
     lowest_low = df['low'].rolling(window=k_period).min()
     highest_high = df['high'].rolling(window=k_period).max()
     df['%K'] = 100 * ((df['close'] - lowest_low) / (highest_high - lowest_low))
@@ -179,7 +176,7 @@ def calculate_stochastic(df, k_period=14, d_period=3):
 # ---------------------- تعريف استراتيجية محسّنة للتداول اليومي ----------------------
 class DayTradingStrategy:
     stoploss = -0.015
-    minimal_roi = {"0": 0.02}
+    minimal_roi = {"0": 0.01}  # تقليل الحد الأدنى للربح إلى 1%
 
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         if len(df) < 50:
@@ -191,20 +188,19 @@ class DayTradingStrategy:
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
         df = calculate_atr_indicator(df, period=7)
         df = calculate_macd_indicator(df)
-        df = calculate_stochastic(df)  # إضافة مؤشر Stochastic
-        df['resistance'] = df['high'].rolling(window=20).max()  # زيادة النافذة لتحسين الدقة
+        df = calculate_stochastic(df)
+        df['resistance'] = df['high'].rolling(window=20).max()
         df['support'] = df['low'].rolling(window=20).min()
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
-            (df['ema5'] > df['ema13']) &
-            (df['ema5'].shift(1) <= df['ema13'].shift(1)) &  # تقاطع EMA
-            (df['rsi'].between(45, 60)) &  # تضييق نطاق RSI لتجنب التذبذب
+            (df['ema5'] > df['ema13']) &  # تقاطع EMA
+            (df['rsi'].between(30, 70)) &  # توسيع نطاق RSI
             (df['close'] > df['vwap']) &
-            (df['macd'] > df['macd_signal']) &  # MACD فوق خط الإشارة
-            (df['%K'] > df['%D']) & (df['%K'] < 80) &  # شرط Stochastic
-            (df['volume'] > df['volume'].rolling(window=10).mean() * 1.2)  # حجم تداول مرتفع
+            (df['macd'] > df['macd_signal']) &
+            (df['%K'] > df['%D']) & (df['%K'] < 90) &  # تخفيف شرط Stochastic
+            (df['volume'] > df['volume'].rolling(window=10).mean())  # تقليل شرط الحجم
         )
         df.loc[conditions, 'buy'] = 1
         return df
@@ -212,9 +208,9 @@ class DayTradingStrategy:
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
             (df['ema5'] < df['ema13']) |
-            (df['rsi'] > 70) |
+            (df['rsi'] > 80) |  # زيادة الحد الأعلى لـ RSI
             (df['macd'] < df['macd_signal']) |
-            (((df['%K'] < df['%D']) & (df['%K'] > 20)))  # شرط Stochastic مع تجميع الشروط
+            (df['%K'] < df['%D'])  # تبسيط شرط Stochastic
         )
         df.loc[conditions, 'sell'] = 1
         return df
@@ -240,16 +236,16 @@ def generate_signal_using_day_trading_strategy(df, symbol):
 
         price_range = resistance - support
         fib_618 = current_price + price_range * 0.618
-        target = min(fib_618, resistance * 0.995, current_price + atr * 2.5)
-        stop_loss = max(current_price - atr * 1.5, support * 1.005)
+        target = min(fib_618, resistance * 0.995, current_price + atr * 2)
+        stop_loss = max(current_price - atr * 1.2, support * 1.005)
         dynamic_stop_loss = stop_loss
 
         risk = current_price - stop_loss
         reward = target - current_price
         risk_reward_ratio = reward / risk if risk > 0 else 0
 
-        if risk_reward_ratio < 2.5 or reward / current_price < 0.025:
-            logger.info(f"{symbol}: تجاهل الإشارة - RR < 2.5 أو الربح < 2.5%")
+        if risk_reward_ratio < 1.5 or reward / current_price < 0.01:  # تخفيف الشروط
+            logger.info(f"{symbol}: تجاهل الإشارة - RR < 1.5 أو الربح < 1%")
             return None
 
         signal = {
@@ -304,17 +300,10 @@ def webhook():
     return '', 200
 
 def send_report(chat_id_callback):
-    """
-    توليد تقرير شامل يحتوي على:
-      - الصفقات الرابحة (achieved_target = TRUE) مع حساب نسبة الربح والمبلغ المحقق
-      - الصفقات الخاسرة (hit_stop_loss = TRUE) مع حساب نسبة الخسارة والمبلغ المحقق
-      - الصفقات المفتوحة (closed_at IS NULL)
-    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # الصفقات الرابحة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
             FROM signals 
@@ -324,7 +313,6 @@ def send_report(chat_id_callback):
         """)
         winning_trades = cur.fetchall()
         
-        # الصفقات الخاسرة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
             FROM signals 
@@ -334,7 +322,6 @@ def send_report(chat_id_callback):
         """)
         losing_trades = cur.fetchall()
         
-        # الصفقات المفتوحة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at 
             FROM signals 
@@ -347,7 +334,6 @@ def send_report(chat_id_callback):
         
         report_message = "📊 **تقرير شامل للصفقات**\n\n"
         
-        # قسم الصفقات الرابحة مع حساب الربح
         report_message += "🏆 **الصفقات الرابحة:**\n"
         if winning_trades:
             for trade in winning_trades:
@@ -369,7 +355,6 @@ def send_report(chat_id_callback):
         else:
             report_message += "لا توجد صفقات رابحة.\n\n"
         
-        # قسم الصفقات الخاسرة مع حساب الخسارة
         report_message += "❌ **الصفقات الخاسرة:**\n"
         if losing_trades:
             for trade in losing_trades:
@@ -390,7 +375,6 @@ def send_report(chat_id_callback):
         else:
             report_message += "لا توجد صفقات خاسرة.\n\n"
         
-        # قسم الصفقات المفتوحة
         report_message += "⏳ **الصفقات المفتوحة:**\n"
         if open_trades:
             for trade in open_trades:
@@ -406,7 +390,6 @@ def send_report(chat_id_callback):
         else:
             report_message += "لا توجد صفقات مفتوحة.\n\n"
         
-        # إرسال التقرير عبر Telegram
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
             "chat_id": chat_id_callback,
@@ -426,11 +409,10 @@ def get_crypto_symbols():
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
-        # فلترة الأزواج بناءً على حجم التداول
         filtered_symbols = []
         for symbol in symbols:
             volume = fetch_recent_volume(symbol)
-            if volume > 100000:
+            if volume > 50000:  # تقليل الحد الأدنى للسيولة
                 filtered_symbols.append(symbol)
         logger.info(f"تم جلب {len(filtered_symbols)} زوج بعد الفلترة")
         return filtered_symbols
@@ -629,7 +611,7 @@ def analyze_market():
             if df is None or len(df) < 100:
                 continue
             volume_15m = fetch_recent_volume(symbol)
-            if volume_15m < 100000:
+            if volume_15m < 50000:  # تقليل الحد الأدنى للسيولة
                 continue
             signal = generate_signal_using_day_trading_strategy(df, symbol)
             if signal:
