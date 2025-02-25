@@ -438,17 +438,23 @@ def send_report(chat_id_callback):
 # ---------------------- وظائف تحليل البيانات ----------------------
 def get_crypto_symbols():
     try:
-        with open('crypto_list.txt', 'r') as f:
-            symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
+        # الحصول على معلومات البورصة من Binance
+        exchange_info = client.get_exchange_info()
+        # استخراج الأزواج التي يكون فيها العملة المقابلة USDT وحالتها "TRADING"
+        symbols = [
+            s['symbol'] 
+            for s in exchange_info['symbols'] 
+            if s['quoteAsset'] == 'USDT' and s['status'] == 'TRADING'
+        ]
         filtered_symbols = []
         for symbol in symbols:
             volume = fetch_recent_volume(symbol)
-            if volume > 50000:  # تقليل الحد الأدنى للسيولة
+            if volume > 50000:  # شرط السيولة
                 filtered_symbols.append(symbol)
-        logger.info(f"تم جلب {len(filtered_symbols)} زوج بعد الفلترة")
+        logger.info(f"تم جلب {len(filtered_symbols)} زوج USDT بعد الفلترة")
         return filtered_symbols
     except Exception as e:
-        logger.error(f"خطأ في قراءة الملف: {e}")
+        logger.error(f"خطأ في جلب الأزواج من Binance: {e}")
         return []
 
 def fetch_historical_data(symbol, interval='5m', days=3):
