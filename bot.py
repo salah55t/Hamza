@@ -21,7 +21,7 @@ from cachetools import TTLCache
 # ---------------------- إعدادات التسجيل المحسنة ----------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',  # إضافة اسم الدالة للسجل
+    format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',
     handlers=[logging.FileHandler('crypto_bot.log'), logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
@@ -179,24 +179,37 @@ def calculate_stochastic(df, k_period=14, d_period=3):
     return df
 
 # ---------------------- تعريف استراتيجية محسّنة للتداول اليومي ----------------------
-class DayTradingStrategy:
+class ImprovedDayTradingStrategy:
     stoploss = -0.015
-    minimal_roi = {"0": 0.01}  # تقليل الحد الأدنى للربح إلى 1%
+    minimal_roi = {"0": 0.008, "30": 0.005, "60": 0.003}  # ROI متدرج حسب الوقت
 
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if len(df) < 50:
-            logger.warning(f"عدد البيانات غير كافٍ: {len(df)} أقل من 50")
-            return df
+        # إضافة مؤشرات متقدمة
+        df['volume_change'] = df['volume'].pct_change().rolling(window=3).mean()
+        df['price_momentum'] = df['close'].diff(3).rolling(window=5).mean()
+        df['volatility'] = df['high'].div(df['low']).rolling(window=10).mean()
+        
+        # المؤشرات الحالية مع تحسينات
         df['ema5'] = calculate_ema(df['close'], 5)
         df['ema13'] = calculate_ema(df['close'], 13)
+        df['ema21'] = calculate_ema(df['close'], 21)  # إضافة EMA إضافي
         df['rsi'] = calculate_rsi_indicator(df, period=7)
+        df['rsi_divergence'] = df['rsi'].diff(3)  # مؤشر اختلاف RSI
+        
+        # حساب Bollinger Bands
+        df['ma20'] = df['close'].rolling(window=20).mean()
+        std20 = df['close'].rolling(window=20).std()
+        df['upper_band'] = df['ma20'] + (std20 * 2)
+        df['lower_band'] = df['ma20'] - (std20 * 2)
+        
+        # باقي المؤشرات كما هي
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
         df = calculate_atr_indicator(df, period=7)
         df = calculate_macd_indicator(df)
         df = calculate_stochastic(df)
         df['resistance'] = df['high'].rolling(window=20).max()
         df['support'] = df['low'].rolling(window=20).min()
-        logger.info(f"تم حساب المؤشرات لـ {len(df)} صف")
+        
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -205,7 +218,7 @@ class DayTradingStrategy:
             (df['rsi'].between(30, 70)) &  # توسيع نطاق RSI
             (df['close'] > df['vwap']) &
             (df['macd'] > df['macd_signal']) &
-            (df['%K'] > df['%D']) & (df['%K'] < 90) &  # تخفيف شرط Stochastic
+            ((df['%K'] > df['%D']) & (df['%K'] < 90)) &  # تخفيف شرط Stochastic (تصحيح الأقواس)
             (df['volume'] > df['volume'].rolling(window=10).mean())  # تقليل شرط الحجم
         )
         df.loc[conditions, 'buy'] = 1
@@ -224,81 +237,155 @@ class DayTradingStrategy:
         return df
 
 # ---------------------- دالة توليد الإشارة المحسنة للتداول اليومي ----------------------
-def generate_signal_using_day_trading_strategy(df, symbol):
-    logger.info(f"بدء فحص الإشارة لـ {symbol}")
-    df = df.dropna().reset_index(drop=True)
+def generate_improved_signal(df, symbol):
+    # الفلترة الأولية للبيانات
     if len(df) < 50:
-        logger.warning(f"{symbol}: بيانات غير كافية ({len(df)} < 50)")
         return None
-
-    strategy = DayTradingStrategy()
+    
+    strategy = ImprovedDayTradingStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
+    
     last_row = df.iloc[-1]
+    
+    if last_row.get('buy', 0) != 1:
+        return None
+    
+    # تحسين أنماط الشموع
+    candle_pattern = analyze_candle_pattern(df)
+    if not candle_pattern['bullish']:
+        return None
+    
+    # تحليل تقلبات السوق
+    market_volatility = df['atr'].iloc[-1] / df['close'].iloc[-1]
+    current_price = last_row['close']
+    atr = last_row['atr']
+    
+    # تحديد مستويات المقاومة والدعم
+    resistance = last_row['resistance']
+    support = last_row['support']
+    price_range = resistance - support
+    
+    # اختيار هدف فيبوناتشي
+    recent_highs = df['high'][-20:].values
+    recent_highs.sort()
+    fib_levels = [current_price + price_range * level for level in [0.382, 0.618, 0.786]]
+    target = select_best_target_level(current_price, fib_levels, recent_highs)
+    
+    # تحسين وقف الخسارة
+    volatility_factor = min(1.5, max(1.0, 1.0 + market_volatility * 10))
+    stop_loss = current_price - (atr * volatility_factor)
+    stop_loss = max(stop_loss, support * 1.005)
+    
+    risk = current_price - stop_loss
+    reward = target - current_price
+    risk_reward_ratio = reward / risk if risk > 0 else 0
+    
+    confidence_score = calculate_confidence_score(
+        last_row, candle_pattern, risk_reward_ratio, market_volatility
+    )
+    
+    if risk_reward_ratio < 1.8 or confidence_score < 70:
+        return None
+    if reward / current_price < 0.01:
+        return None
+    
+    dynamic_stop_loss = stop_loss
+    
+    signal = {
+        'symbol': symbol,
+        'price': float(format(current_price, '.8f')),
+        'target': float(format(target, '.8f')),
+        'stop_loss': float(format(stop_loss, '.8f')),
+        'dynamic_stop_loss': float(format(dynamic_stop_loss, '.8f')),
+        'strategy': 'improved_day_trading',
+        'confidence': confidence_score,
+        'market_condition': 'volatile' if market_volatility > 0.02 else 'stable',
+        'indicators': {
+            'ema5': last_row['ema5'],
+            'ema13': last_row['ema13'],
+            'rsi': last_row['rsi'],
+            'vwap': last_row['vwap'],
+            'atr': atr,
+            'macd': last_row['macd'],
+            'macd_signal': last_row['macd_signal'],
+            '%K': last_row['%K'],
+            '%D': last_row['%D'],
+            'resistance': resistance,
+            'support': support
+        },
+        'trade_value': TRADE_VALUE,
+        'risk_reward_ratio': risk_reward_ratio
+    }
+    
+    return signal
 
-    if last_row.get('buy', 0) == 1:
-        current_price = last_row['close']
-        atr = last_row['atr']
-        resistance = last_row['resistance']
-        support = last_row['support']
+def select_best_target_level(current_price, fib_levels, recent_highs):
+    """اختيار أفضل هدف بناءً على مستويات الارتداد السابقة"""
+    for level in fib_levels:
+        for high in recent_highs:
+            if abs(high - level) / level < 0.01:  # ضمن نطاق 1%
+                return min(level, high * 0.998)
+    return fib_levels[1]
 
-        price_range = resistance - support
-        fib_618 = current_price + price_range * 0.618
-        target = min(fib_618, resistance * 0.995, current_price + atr * 2)
-        stop_loss = max(current_price - atr * 1.2, support * 1.005)
-        dynamic_stop_loss = stop_loss
+def analyze_candle_pattern(df):
+    """تحليل أنماط الشموع في آخر 3 شمعات"""
+    last_candles = df.iloc[-3:].copy()
+    
+    last_candles['body'] = abs(last_candles['close'] - last_candles['open'])
+    last_candles['upper_shadow'] = last_candles['high'] - last_candles[['open', 'close']].max(axis=1)
+    last_candles['lower_shadow'] = last_candles[['open', 'close']].min(axis=1) - last_candles['low']
+    
+    doji = last_candles.iloc[-1]['body'] < (last_candles.iloc[-1]['high'] - last_candles.iloc[-1]['low']) * 0.1
+    hammer = (
+        last_candles.iloc[-1]['lower_shadow'] > last_candles.iloc[-1]['body'] * 2 and
+        last_candles.iloc[-1]['upper_shadow'] < last_candles.iloc[-1]['body'] * 0.5
+    )
+    bullish_engulfing = (
+        last_candles.iloc[-2]['close'] < last_candles.iloc[-2]['open'] and
+        last_candles.iloc[-1]['close'] > last_candles.iloc[-1]['open'] and
+        last_candles.iloc[-1]['open'] < last_candles.iloc[-2]['close'] and
+        last_candles.iloc[-1]['close'] > last_candles.iloc[-2]['open']
+    )
+    
+    return {
+        'doji': doji,
+        'hammer': hammer,
+        'bullish_engulfing': bullish_engulfing,
+        'bullish': hammer or bullish_engulfing or (not doji and last_candles.iloc[-1]['close'] > last_candles.iloc[-1]['open'])
+    }
 
-        risk = current_price - stop_loss
-        reward = target - current_price
-        risk_reward_ratio = reward / risk if risk > 0 else 0
-
-        # تسجيل المؤشرات مع تفاصيل
-        logger.info(
-            f"{symbol} - المؤشرات: "
-            f"EMA5={last_row['ema5']:.4f}, EMA13={last_row['ema13']:.4f}, "
-            f"RSI={last_row['rsi']:.2f}, VWAP={last_row['vwap']:.4f}, "
-            f"ATR={atr:.8f}, MACD={last_row['macd']:.4f}, "
-            f"MACD Signal={last_row['macd_signal']:.4f}, "
-            f"%K={last_row['%K']:.2f}, %D={last_row['%D']:.2f}, "
-            f"Resistance={resistance:.4f}, Support={support:.4f}"
-        )
-
-        # التحقق من أسباب الرفض
-        if risk_reward_ratio < 1.5:
-            logger.info(f"{symbol}: تم رفض التوصية - نسبة المخاطرة/العائد ({risk_reward_ratio:.2f}) < 1.5")
-            return None
-        if reward / current_price < 0.01:
-            logger.info(f"{symbol}: تم رفض التوصية - الربح المتوقع ({reward / current_price:.4f}) < 1%")
-            return None
-
-        signal = {
-            'symbol': symbol,
-            'price': float(format(current_price, '.8f')),
-            'target': float(format(target, '.8f')),
-            'stop_loss': float(format(stop_loss, '.8f')),
-            'dynamic_stop_loss': float(format(dynamic_stop_loss, '.8f')),
-            'strategy': 'day_trading',
-            'indicators': {
-                'ema5': last_row['ema5'],
-                'ema13': last_row['ema13'],
-                'rsi': last_row['rsi'],
-                'vwap': last_row['vwap'],
-                'atr': atr,
-                'macd': last_row['macd'],
-                'macd_signal': last_row['macd_signal'],
-                'resistance': resistance,
-                'support': support,
-                '%K': last_row['%K'],
-                '%D': last_row['%D']
-            },
-            'trade_value': TRADE_VALUE,
-            'risk_reward_ratio': risk_reward_ratio
-        }
-        logger.info(f"تم توليد إشارة تداول يومي لـ {symbol} بنجاح")
-        return signal
-    else:
-        logger.info(f"{symbol}: لا توجد إشارة شراء - شروط التوصية غير مستوفاة")
-    return None
+def calculate_confidence_score(indicators, candle_pattern, risk_reward_ratio, volatility):
+    """حساب درجة الثقة في الإشارة من 0 إلى 100"""
+    score = 60  # نقطة البداية
+    
+    if indicators['rsi'] < 40:
+        score += 5
+    elif indicators['rsi'] > 65:
+        score -= 10
+        
+    if indicators['macd'] > indicators['macd_signal']:
+        score += 7
+    
+    if indicators['ema5'] > indicators['ema13'] and indicators['ema13'] > indicators.get('ema21', 0):
+        score += 8
+        
+    if candle_pattern['bullish_engulfing']:
+        score += 10
+    elif candle_pattern['hammer']:
+        score += 8
+    
+    if risk_reward_ratio > 3:
+        score += 10
+    elif risk_reward_ratio > 2:
+        score += 5
+    
+    if volatility < 0.01:
+        score += 5
+    elif volatility > 0.03:
+        score -= 8
+        
+    return max(0, min(100, score))
 
 # ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
@@ -438,9 +525,7 @@ def send_report(chat_id_callback):
 # ---------------------- وظائف تحليل البيانات ----------------------
 def get_crypto_symbols():
     try:
-        # الحصول على معلومات البورصة من Binance
         exchange_info = client.get_exchange_info()
-        # استخراج الأزواج التي يكون فيها العملة المقابلة USDT وحالتها "TRADING"
         symbols = [
             s['symbol'] 
             for s in exchange_info['symbols'] 
@@ -449,7 +534,7 @@ def get_crypto_symbols():
         filtered_symbols = []
         for symbol in symbols:
             volume = fetch_recent_volume(symbol)
-            if volume > 50000:  # شرط السيولة
+            if volume > 50000:
                 filtered_symbols.append(symbol)
         logger.info(f"تم جلب {len(filtered_symbols)} زوج USDT بعد الفلترة")
         return filtered_symbols
@@ -502,7 +587,6 @@ def get_market_dominance():
         logger.error(f"خطأ في get_market_dominance: {e}")
         return None, None
 
-# ---------------------- إرسال التنبيهات عبر Telegram بتصميم محسن ----------------------
 def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
@@ -575,35 +659,81 @@ def send_telegram_alert_special(message):
         logger.error(f"خطأ في send_telegram_alert_special: {e}")
 
 # ---------------------- خدمة تتبع الإشارات مع وقف خسارة متحرك ----------------------
-def track_signals():
-    logger.info("بدء خدمة تتبع الإشارات")
+def improved_track_signals():
+    logger.info("بدء خدمة تتبع الإشارات المحسنة")
+    
     while True:
         conn = get_db_connection()
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, symbol, entry_price, target, stop_loss, dynamic_stop_loss 
-                FROM signals 
+                SELECT id, symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at  
+                FROM signals
                 WHERE achieved_target = FALSE AND hit_stop_loss = FALSE AND closed_at IS NULL
             """)
             active_signals = cur.fetchall()
+            
             for signal in active_signals:
-                signal_id, symbol, entry, target, stop_loss, dynamic_stop_loss = signal
+                signal_id, symbol, entry, target, stop_loss, dynamic_stop_loss, sent_at = signal
                 current_price = last_price_update.get(symbol, None)
+                
                 if not current_price:
                     continue
-                df = fetch_historical_data(symbol)
-                if df is None:
+                    
+                df = fetch_historical_data(symbol, interval='5m', days=1)
+                if df is None or len(df) < 20:
                     continue
-                atr = df.iloc[-1]['atr']
+                    
+                df = calculate_atr_indicator(df)
+                current_atr = df['atr'].iloc[-1]
+                
+                time_in_trade = (datetime.now(timezone) - sent_at).total_seconds() / 3600
+                price_change_pct = (current_price - entry) / entry * 100
+                
                 if current_price > entry:
-                    new_dynamic_stop_loss = max(dynamic_stop_loss, current_price - atr * 1.2)
-                    if new_dynamic_stop_loss != dynamic_stop_loss:
-                        cur.execute("UPDATE signals SET dynamic_stop_loss = %s WHERE id = %s", (new_dynamic_stop_loss, signal_id))
+                    pct_based_stop = entry + (current_price - entry) * 0.5
+                    atr_based_stop = current_price - current_atr * 1.5
+                    time_factor = min(0.8, time_in_trade / 24)
+                    time_based_stop = entry + (current_price - entry) * time_factor
+                    
+                    if price_change_pct > 3:
+                        fib_based_stop = entry + (current_price - entry) * 0.382
+                    elif price_change_pct > 1:
+                        fib_based_stop = entry + (current_price - entry) * 0.236
+                    else:
+                        fib_based_stop = stop_loss
+                    
+                    candidate_stops = [
+                        dynamic_stop_loss,
+                        pct_based_stop,
+                        atr_based_stop,
+                        time_based_stop,
+                        fib_based_stop,
+                        stop_loss
+                    ]
+                    
+                    new_dynamic_stop_loss = max(candidate_stops)
+                    
+                    if new_dynamic_stop_loss > dynamic_stop_loss * 1.005:
+                        cur.execute("UPDATE signals SET dynamic_stop_loss = %s WHERE id = %s", 
+                                   (new_dynamic_stop_loss, signal_id))
                         conn.commit()
-                        logger.info(f"{symbol}: تحديث وقف الخسارة المتحرك إلى {new_dynamic_stop_loss:.8f}")
+                        logger.info(f"{symbol}: تحديث وقف الخسارة المتحرك من {dynamic_stop_loss:.8f} إلى {new_dynamic_stop_loss:.8f}")
+                        
+                        if new_dynamic_stop_loss > dynamic_stop_loss * 1.05:
+                            msg = (
+                                f"📊 **تحديث وقف الخسارة - {symbol}** 📊\n"
+                                "----------------------------------------\n"
+                                f"💰 سعر الدخول: **${entry:.8f}**\n"
+                                f"💹 السعر الحالي: **${current_price:.8f}**\n"
+                                f"🛡️ وقف الخسارة الجديد: **${new_dynamic_stop_loss:.8f}**\n"
+                                f"📈 الربح المضمون: **+{((new_dynamic_stop_loss - entry) / entry * 100):.2f}%**\n"
+                                f"⏰ الوقت: {datetime.now(timezone).strftime('%H:%M:%S')}"
+                            )
+                            send_telegram_alert_special(msg)
                 else:
                     new_dynamic_stop_loss = stop_loss
+                
                 if current_price >= target:
                     profit = ((current_price - entry) / entry) * 100
                     msg = (
@@ -620,11 +750,11 @@ def track_signals():
                 elif current_price <= new_dynamic_stop_loss:
                     loss = ((current_price - entry) / entry) * 100
                     msg = (
-                        f"⚠️🔴 **تنبيه: تفعيل وقف الخسارة - {symbol}** 🔴⚠️\n"
+                        f"⚠️ **تنبيه: تفعيل وقف الخسارة - {symbol}** ⚠️\n"
                         "----------------------------------------\n"
                         f"💰 الدخول: **${entry:.8f}**\n"
                         f"❌ الخروج: **${current_price:.8f}**\n"
-                        f"📉 الخسارة: **{loss:.2f}%**\n"
+                        f"📉 التغيير: **{loss:.2f}%**\n"
                         f"⏰ الوقت: {datetime.now(timezone).strftime('%H:%M:%S')}"
                     )
                     send_telegram_alert_special(msg)
@@ -635,7 +765,8 @@ def track_signals():
             conn.rollback()
         finally:
             release_db_connection(conn)
-        time.sleep(120)
+        
+        time.sleep(90)
 
 # ---------------------- فحص الأزواج بشكل دوري ----------------------
 def analyze_market():
@@ -654,10 +785,11 @@ def analyze_market():
             if df is None or len(df) < 100:
                 continue
             volume_15m = fetch_recent_volume(symbol)
-            if volume_15m < 50000:  # تقليل الحد الأدنى للسيولة
+            if volume_15m < 50000:
                 logger.info(f"{symbol}: تم رفض التوصية - السيولة ({volume_15m:,.2f} USDT) أقل من 50000")
                 continue
-            signal = generate_signal_using_day_trading_strategy(df, symbol)
+            # تغيير اسم الدالة إلى الدالة المُحسّنة
+            signal = generate_improved_signal(df, symbol)
             if signal:
                 send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
                 cur.execute("""
@@ -692,7 +824,8 @@ if __name__ == '__main__':
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
     
     Thread(target=run_flask, daemon=True).start()
-    Thread(target=track_signals, daemon=True).start()
+    # تم تعديل اسم الدالة إلى improved_track_signals
+    Thread(target=improved_track_signals, daemon=True).start()
     Thread(target=run_ticker_socket_manager, daemon=True).start()
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=10)
