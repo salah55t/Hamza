@@ -210,19 +210,18 @@ class ImprovedDayTradingStrategy:
         df['resistance'] = df['high'].rolling(window=20).max()
         df['support'] = df['low'].rolling(window=20).min()
         
+        logger.info("تم حساب المؤشرات الفنية بنجاح")
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
             (df['ema5'] > df['ema13']) &
             (df['rsi'].between(25, 75)) &  # توسيع نطاق RSI
-            # (df['close'] > df['vwap']) &  # إزالة شرط الـ VWAP لتخفيف القيود
             (df['macd'] > df['macd_signal']) &
-            (df['%K'] > df['%D'])         # تبسيط شرط Stochastic
-            # يمكن تعديل شرط الحجم أو إزالته إذا لزم الأمر
+            (df['%K'] > df['%D'])
         )
         df.loc[conditions, 'buy'] = 1
-        logger.debug(f"شروط الشراء: {conditions.iloc[-1]}")
+        logger.debug(f"شروط الشراء الأخيرة: {conditions.iloc[-1]}")
         return df
 
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -230,30 +229,32 @@ class ImprovedDayTradingStrategy:
             (df['ema5'] < df['ema13']) |
             (df['rsi'] > 80) |  # زيادة الحد الأعلى لـ RSI
             (df['macd'] < df['macd_signal']) |
-            (df['%K'] < df['%D'])  # تبسيط شرط Stochastic
+            (df['%K'] < df['%D'])
         )
         df.loc[conditions, 'sell'] = 1
-        logger.debug(f"شروط البيع: {conditions.iloc[-1]}")
+        logger.debug(f"شروط البيع الأخيرة: {conditions.iloc[-1]}")
         return df
 
 # ---------------------- دالة توليد الإشارة المحسنة للتداول اليومي ----------------------
 def generate_improved_signal(df, symbol):
     # الفلترة الأولية للبيانات
     if len(df) < 50:
+        logger.info(f"{symbol}: تم رفض التوصية - البيانات غير كافية (عدد الصفوف: {len(df)})")
         return None
-    
+
     strategy = ImprovedDayTradingStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
-    
     last_row = df.iloc[-1]
     
     if last_row.get('buy', 0) != 1:
+        logger.info(f"{symbol}: تم رفض التوصية - شروط الشراء غير مستوفاة")
         return None
     
     # تحسين أنماط الشموع
     candle_pattern = analyze_candle_pattern(df)
     if not candle_pattern['bullish']:
+        logger.info(f"{symbol}: تم رفض التوصية - نمط الشموع غير صاعد (bullish not detected)")
         return None
     
     # تحليل تقلبات السوق
@@ -266,13 +267,11 @@ def generate_improved_signal(df, symbol):
     support = last_row['support']
     price_range = resistance - support
     
-    # اختيار هدف فيبوناتشي
     recent_highs = df['high'][-20:].values
     recent_highs.sort()
     fib_levels = [current_price + price_range * level for level in [0.382, 0.618, 0.786]]
     target = select_best_target_level(current_price, fib_levels, recent_highs)
     
-    # تحسين وقف الخسارة
     volatility_factor = min(1.5, max(1.0, 1.0 + market_volatility * 10))
     stop_loss = current_price - (atr * volatility_factor)
     stop_loss = max(stop_loss, support * 1.005)
@@ -281,14 +280,13 @@ def generate_improved_signal(df, symbol):
     reward = target - current_price
     risk_reward_ratio = reward / risk if risk > 0 else 0
     
-    confidence_score = calculate_confidence_score(
-        last_row, candle_pattern, risk_reward_ratio, market_volatility
-    )
+    confidence_score = calculate_confidence_score(last_row, candle_pattern, risk_reward_ratio, market_volatility)
     
-    # تخفيف الشروط: تقليل عتبة نسبة المخاطرة/العائد ودرجة الثقة
     if risk_reward_ratio < 1.5 or confidence_score < 60:
+        logger.info(f"{symbol}: تم رفض التوصية - نسبة المخاطرة/العائد ({risk_reward_ratio:.2f}) أو درجة الثقة ({confidence_score}) غير كافية")
         return None
     if reward / current_price < 0.01:
+        logger.info(f"{symbol}: تم رفض التوصية - الربح المتوقع ({reward/current_price:.4f}) أقل من الحد الأدنى")
         return None
     
     dynamic_stop_loss = stop_loss
@@ -319,6 +317,7 @@ def generate_improved_signal(df, symbol):
         'risk_reward_ratio': risk_reward_ratio
     }
     
+    logger.info(f"{symbol}: تم توليد توصية بنجاح - السعر الحالي: {current_price}, الهدف: {target}, وقف الخسارة: {stop_loss}")
     return signal
 
 def select_best_target_level(current_price, fib_levels, recent_highs):
@@ -332,29 +331,26 @@ def select_best_target_level(current_price, fib_levels, recent_highs):
 def analyze_candle_pattern(df):
     """تحليل أنماط الشموع في آخر 3 شمعات"""
     last_candles = df.iloc[-3:].copy()
-    
     last_candles['body'] = abs(last_candles['close'] - last_candles['open'])
     last_candles['upper_shadow'] = last_candles['high'] - last_candles[['open', 'close']].max(axis=1)
     last_candles['lower_shadow'] = last_candles[['open', 'close']].min(axis=1) - last_candles['low']
     
     doji = last_candles.iloc[-1]['body'] < (last_candles.iloc[-1]['high'] - last_candles.iloc[-1]['low']) * 0.1
-    hammer = (
-        last_candles.iloc[-1]['lower_shadow'] > last_candles.iloc[-1]['body'] * 2 and
-        last_candles.iloc[-1]['upper_shadow'] < last_candles.iloc[-1]['body'] * 0.5
-    )
-    bullish_engulfing = (
-        last_candles.iloc[-2]['close'] < last_candles.iloc[-2]['open'] and
-        last_candles.iloc[-1]['close'] > last_candles.iloc[-1]['open'] and
-        last_candles.iloc[-1]['open'] < last_candles.iloc[-2]['close'] and
-        last_candles.iloc[-1]['close'] > last_candles.iloc[-2]['open']
-    )
+    hammer = (last_candles.iloc[-1]['lower_shadow'] > last_candles.iloc[-1]['body'] * 2 and
+              last_candles.iloc[-1]['upper_shadow'] < last_candles.iloc[-1]['body'] * 0.5)
+    bullish_engulfing = (last_candles.iloc[-2]['close'] < last_candles.iloc[-2]['open'] and
+                         last_candles.iloc[-1]['close'] > last_candles.iloc[-1]['open'] and
+                         last_candles.iloc[-1]['open'] < last_candles.iloc[-2]['close'] and
+                         last_candles.iloc[-1]['close'] > last_candles.iloc[-2]['open'])
     
-    return {
+    pattern = {
         'doji': doji,
         'hammer': hammer,
         'bullish_engulfing': bullish_engulfing,
         'bullish': hammer or bullish_engulfing or (not doji and last_candles.iloc[-1]['close'] > last_candles.iloc[-1]['open'])
     }
+    logger.debug(f"تحليل الشموع: {pattern}")
+    return pattern
 
 def calculate_confidence_score(indicators, candle_pattern, risk_reward_ratio, volatility):
     """حساب درجة الثقة في الإشارة من 0 إلى 100"""
@@ -386,7 +382,9 @@ def calculate_confidence_score(indicators, candle_pattern, risk_reward_ratio, vo
     elif volatility > 0.03:
         score -= 8
         
-    return max(0, min(100, score))
+    final_score = max(0, min(100, score))
+    logger.debug(f"درجة الثقة المحسوبة: {final_score}")
+    return final_score
 
 # ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
@@ -546,7 +544,7 @@ def get_crypto_symbols():
 def fetch_historical_data(symbol, interval='5m', days=3):
     cache_key = f"{symbol}_{interval}_{days}"
     if cache_key in historical_data_cache:
-        logger.info(f"جلب بيانات تاريخية لـ {symbol} من الكاش")
+        logger.info(f"{symbol}: جلب بيانات تاريخية من الكاش")
         return historical_data_cache[cache_key]
     for attempt in range(3):
         try:
@@ -556,22 +554,22 @@ def fetch_historical_data(symbol, interval='5m', days=3):
                                                  'taker_buy_quote', 'ignore'])
             df = df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].astype(float)
             historical_data_cache[cache_key] = df
-            logger.info(f"تم جلب {len(df)} صف من بيانات {symbol}")
+            logger.info(f"{symbol}: تم جلب {len(df)} صف من البيانات التاريخية")
             return df
         except Exception as e:
-            logger.error(f"خطأ في جلب بيانات {symbol} (محاولة {attempt+1}): {e}")
+            logger.error(f"{symbol}: خطأ في جلب البيانات (محاولة {attempt+1}): {e}")
             time.sleep(2 ** attempt)
-    logger.error(f"فشل جلب بيانات {symbol} بعد 3 محاولات")
+    logger.error(f"{symbol}: فشل جلب البيانات بعد 3 محاولات")
     return None
 
 def fetch_recent_volume(symbol):
     try:
-        logger.info(f"جلب حجم السيولة لـ {symbol} في آخر 15 دقيقة")
+        logger.info(f"{symbol}: جلب حجم السيولة في آخر 15 دقيقة")
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
         return volume
     except Exception as e:
-        logger.error(f"خطأ في جلب حجم {symbol}: {e}")
+        logger.error(f"{symbol}: خطأ في جلب حجم السيولة: {e}")
         return 0
 
 def get_market_dominance():
@@ -632,14 +630,14 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             try:
                 response = requests.post(url, json=payload, timeout=10)
                 if response.status_code == 200:
-                    logger.info(f"تم إرسال توصية لـ {signal['symbol']} بنجاح")
+                    logger.info(f"{signal['symbol']}: تم إرسال التوصية بنجاح")
                     return
                 else:
-                    logger.error(f"فشل إرسال التوصية: {response.text}")
+                    logger.error(f"{signal['symbol']}: فشل إرسال التوصية: {response.text}")
             except Exception as e:
-                logger.error(f"فشل إرسال توصية لـ {signal['symbol']} (محاولة {attempt+1}): {e}")
+                logger.error(f"{signal['symbol']}: فشل إرسال التوصية (محاولة {attempt+1}): {e}")
                 time.sleep(2 ** attempt)
-        logger.error(f"فشل إرسال توصية لـ {signal['symbol']} بعد 3 محاولات")
+        logger.error(f"{signal['symbol']}: فشل إرسال التوصية بعد 3 محاولات")
     except Exception as e:
         logger.error(f"خطأ في send_telegram_alert: {e}")
 
@@ -679,10 +677,15 @@ def improved_track_signals():
                 current_price = last_price_update.get(symbol, None)
                 
                 if not current_price:
+                    logger.debug(f"{symbol}: لم يتم تحديث السعر الحالي بعد")
                     continue
                     
                 df = fetch_historical_data(symbol, interval='5m', days=1)
-                if df is None or len(df) < 20:
+                if df is None:
+                    logger.info(f"{symbol}: تم تجاهل التوصية - عدم توفر البيانات التاريخية")
+                    continue
+                if len(df) < 20:
+                    logger.info(f"{symbol}: تم تجاهل التوصية - البيانات التاريخية غير كافية (عدد الصفوف: {len(df)})")
                     continue
                     
                 df = calculate_atr_indicator(df)
@@ -783,13 +786,16 @@ def analyze_market():
         symbols = get_crypto_symbols()
         for symbol in symbols:
             df = fetch_historical_data(symbol)
-            if df is None or len(df) < 100:
+            if df is None:
+                logger.info(f"{symbol}: تم رفض التوصية - عدم توفر البيانات التاريخية")
+                continue
+            if len(df) < 100:
+                logger.info(f"{symbol}: تم رفض التوصية - البيانات التاريخية غير كافية (عدد الصفوف: {len(df)})")
                 continue
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 50000:
                 logger.info(f"{symbol}: تم رفض التوصية - السيولة ({volume_15m:,.2f} USDT) أقل من 50000")
                 continue
-            # تغيير اسم الدالة إلى الدالة المُحسّنة
             signal = generate_improved_signal(df, symbol)
             if signal:
                 send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
@@ -803,6 +809,8 @@ def analyze_market():
                     signal['risk_reward_ratio']
                 ))
                 conn.commit()
+            else:
+                logger.info(f"{symbol}: لم يتم توليد توصية")
             time.sleep(1)
     except Exception as e:
         logger.error(f"خطأ في analyze_market: {e}")
@@ -825,7 +833,6 @@ if __name__ == '__main__':
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
     
     Thread(target=run_flask, daemon=True).start()
-    # تم تعديل اسم الدالة إلى improved_track_signals
     Thread(target=improved_track_signals, daemon=True).start()
     Thread(target=run_ticker_socket_manager, daemon=True).start()
     scheduler = BackgroundScheduler()
