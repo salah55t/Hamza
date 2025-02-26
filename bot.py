@@ -812,7 +812,7 @@ def analyze_market():
 # ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
     init_db()
-    set_telegram_webhook_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url=https://hamza-1.onrender.com/webhook"
+    set_telegram_webhook_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url=https://hamza-drs4.onrender.com/webhook"
     try:
         response = requests.get(set_telegram_webhook_url, timeout=10)
         res_json = response.json()
