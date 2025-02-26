@@ -181,28 +181,24 @@ def calculate_stochastic(df, k_period=14, d_period=3):
 # ---------------------- تعريف استراتيجية محسّنة للتداول اليومي ----------------------
 class ImprovedDayTradingStrategy:
     stoploss = -0.015
-    minimal_roi = {"0": 0.008, "30": 0.005, "60": 0.003}  # ROI متدرج حسب الوقت
+    minimal_roi = {"0": 0.008, "30": 0.005, "60": 0.003}
 
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        # إضافة مؤشرات متقدمة
         df['volume_change'] = df['volume'].pct_change().rolling(window=3).mean()
         df['price_momentum'] = df['close'].diff(3).rolling(window=5).mean()
         df['volatility'] = df['high'].div(df['low']).rolling(window=10).mean()
         
-        # المؤشرات الحالية مع تحسينات
         df['ema5'] = calculate_ema(df['close'], 5)
         df['ema13'] = calculate_ema(df['close'], 13)
         df['ema21'] = calculate_ema(df['close'], 21)
         df['rsi'] = calculate_rsi_indicator(df, period=7)
         df['rsi_divergence'] = df['rsi'].diff(3)
         
-        # حساب Bollinger Bands
         df['ma20'] = df['close'].rolling(window=20).mean()
         std20 = df['close'].rolling(window=20).std()
         df['upper_band'] = df['ma20'] + (std20 * 2)
         df['lower_band'] = df['ma20'] - (std20 * 2)
         
-        # باقي المؤشرات
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
         df = calculate_atr_indicator(df, period=7)
         df = calculate_macd_indicator(df)
@@ -500,7 +496,7 @@ def send_report(chat_id_callback):
         
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
-            "chat_id": chat_id_callback,
+            "chat_id": chat_id,
             "text": report_message,
             "parse_mode": "Markdown"
         }
@@ -648,14 +644,15 @@ def send_telegram_alert_special(message):
     except Exception as e:
         logger.error(f"خطأ في send_telegram_alert_special: {e}")
 
-# ---------------------- خدمة تتبع الإشارات مع وقف خسارة متحرك وتحديث الهدف ----------------------
+# ---------------------- خدمة تتبع الإشارات المفتوحة وتحديث الهدف ووقف الخسارة ----------------------
 def improved_track_signals():
-    logger.info("بدء خدمة تتبع الإشارات المحسنة")
+    logger.info("بدء خدمة تتبع الإشارات المفتوحة")
     
     while True:
         conn = get_db_connection()
         try:
             cur = conn.cursor()
+            # التأكد من تتبع التوصيات المفتوحة فقط
             cur.execute("""
                 SELECT id, symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at  
                 FROM signals
@@ -681,6 +678,7 @@ def improved_track_signals():
                 time_in_trade = (datetime.now(timezone) - sent_at).total_seconds() / 3600
                 price_change_pct = (current_price - entry) / entry * 100
                 
+                # تحديث وقف الخسارة المتحرك
                 if current_price > entry:
                     pct_based_stop = entry + (current_price - entry) * 0.5
                     atr_based_stop = current_price - current_atr * 1.5
@@ -724,7 +722,7 @@ def improved_track_signals():
                 else:
                     new_dynamic_stop_loss = stop_loss
                 
-                # تحديث الهدف بناءً على البيانات الحديثة وإرسال تنبيه عند تغييره
+                # تحديث الهدف المتحرك وإرسال تنبيه عند تغييره
                 try:
                     new_resistance = df['high'].rolling(window=20).max().iloc[-1]
                     new_support = df['low'].rolling(window=20).min().iloc[-1]
@@ -748,6 +746,7 @@ def improved_track_signals():
                 except Exception as e:
                     logger.error(f"{symbol}: خطأ في إعادة حساب الهدف: {e}")
                 
+                # إغلاق الصفقة إذا تحقق الهدف أو تفعيل وقف الخسارة
                 if current_price >= target:
                     profit = ((current_price - entry) / entry) * 100
                     msg = (
@@ -787,6 +786,7 @@ def analyze_market():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # السماح بحد أقصى لصفقات مفتوحة (4 توصيات)
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
         active_signals_count = cur.fetchone()[0]
         if active_signals_count >= 4:
