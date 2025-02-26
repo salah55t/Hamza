@@ -1,7 +1,7 @@
 import time
 import logging
 from db import get_db_connection, release_db_connection
-from strategy import generate_improved_signal
+from strategy_enhanced import generate_enhanced_trading_signal  # تم تعديل الاستيراد هنا
 from market import get_crypto_symbols, fetch_historical_data, fetch_recent_volume, get_market_dominance
 from telegram import send_telegram_alert
 from config import TRADE_VALUE
@@ -36,7 +36,7 @@ def analyze_market():
             if volume_15m < 50000:
                 logger.info(f"{symbol}: رفض التوصية - السيولة ({volume_15m:,.2f} USDT) أقل من 50000")
                 continue
-            signal = generate_improved_signal(df, symbol, TRADE_VALUE)
+            signal = generate_enhanced_trading_signal(df, symbol, TRADE_VALUE)
             if signal:
                 send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance)
                 cur.execute(
