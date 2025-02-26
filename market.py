@@ -1,7 +1,7 @@
 import time
 import logging
 from db import get_db_connection, release_db_connection
-from strategy_enhanced import generate_enhanced_trading_signal  # تم تعديل الاستيراد هنا
+from strategy import generate_enhanced_trading_signal  # تعديل الاستيراد هنا من strategy.py
 from telegram import send_telegram_alert
 from config import TRADE_VALUE
 
@@ -10,19 +10,19 @@ logger = logging.getLogger(__name__)
 # تعريف دوال السوق المستخدمة
 def get_crypto_symbols():
     """
-    يجب هنا تنفيذ منطق جلب الأزواج المناسبة.
-    على سبيل المثال، يمكن إرجاع قائمة ثابتة للتجربة.
+    هنا يتم تنفيذ منطق جلب الأزواج المناسبة.
+    يمكن تعديل هذه الدالة لتعمل وفقاً لاحتياجاتك.
     """
     return ["BTCUSDT", "ETHUSDT"]
 
 def fetch_historical_data(symbol, interval='5m', days=3):
     """
-    يجب هنا تنفيذ منطق جلب البيانات التاريخية للزوج.
+    هنا يتم تنفيذ منطق جلب البيانات التاريخية للزوج.
     في هذا المثال نعيد DataFrame تجريبي باستخدام pandas.
     """
     import pandas as pd
     data = {
-        "timestamp": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60],
+        "timestamp": [i for i in range(60)],
         "open": [100 + i for i in range(60)],
         "high": [105 + i for i in range(60)],
         "low": [95 + i for i in range(60)],
@@ -33,15 +33,15 @@ def fetch_historical_data(symbol, interval='5m', days=3):
 
 def fetch_recent_volume(symbol):
     """
-    يجب هنا تنفيذ منطق جلب حجم السيولة للزوج في الفترة الأخيرة.
-    في هذا المثال نعيد قيمة ثابتة.
+    تنفيذ منطق جلب حجم السيولة للزوج في الفترة الأخيرة.
+    هنا نعيد قيمة ثابتة للتجربة.
     """
     return 60000
 
 def get_market_dominance():
     """
-    يجب هنا تنفيذ منطق جلب نسب سيطرة السوق.
-    على سبيل المثال، يمكن إرجاع قيم ثابتة.
+    تنفيذ منطق جلب نسب سيطرة السوق.
+    هنا نعيد قيم ثابتة للتجربة.
     """
     return 45.0, 18.0
 
