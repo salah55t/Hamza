@@ -20,7 +20,7 @@ from cachetools import TTLCache
 
 # ---------------------- إعدادات التسجيل (Logs) ----------------------
 logging.basicConfig(
-    level=logging.DEBUG,  # لتفصيل السجلات بشكل فوري
+    level=logging.DEBUG,  # مستوى التصحيح لتتبع كل العمليات
     format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',
     handlers=[logging.FileHandler('crypto_bot.log'), logging.StreamHandler()]
 )
@@ -36,7 +36,7 @@ db_url = config('DATABASE_URL')
 # تعيين المنطقة الزمنية
 timezone = pytz.timezone('Asia/Riyadh')
 
-# قيمة الصفقة الثابتة للتوصيات (بـ USDT)
+# قيمة الصفقة الثابتة (بالـ USDT)
 TRADE_VALUE = 10
 
 # ---------------------- متغيرات التحكم ----------------------
@@ -464,11 +464,7 @@ def send_report(chat_id_callback):
         else:
             report_message += "🕒 لا توجد صفقات مفتوحة حالياً.\n\n"
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": report_message,
-            "parse_mode": "Markdown"
-        }
+        payload = {"chat_id": chat_id, "text": report_message, "parse_mode": "Markdown"}
         response = requests.post(url, json=payload, timeout=10)
         if response.status_code == 200:
             logger.info("تم إرسال التقرير الشامل بنجاح")
@@ -566,18 +562,9 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"   • ETH: **{eth_dominance:.2f}%**\n"
             f"⏰ **وقت التوصية**: {datetime.now(timezone).strftime('%Y-%m-%d %H:%M')}"
         )
-        reply_markup = {
-            "inline_keyboard": [
-                [{"text": "📊 عرض التقرير الشامل", "callback_data": "get_report"}]
-            ]
-        }
+        reply_markup = {"inline_keyboard": [[{"text": "📊 عرض التقرير الشامل", "callback_data": "get_report"}]]}
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-        payload = {
-            'chat_id': chat_id,
-            'text': message,
-            'parse_mode': 'Markdown',
-            'reply_markup': json.dumps(reply_markup)
-        }
+        payload = {'chat_id': chat_id, 'text': message, 'parse_mode': 'Markdown', 'reply_markup': json.dumps(reply_markup)}
         for attempt in range(3):
             try:
                 response = requests.post(url, json=payload, timeout=10)
@@ -605,7 +592,7 @@ def send_telegram_alert_special(message):
     except Exception as e:
         logger.error(f"خطأ في send_telegram_alert_special: {e}")
 
-# ---------------------- تتبع التوصيات المفتوحة (الصفقات) بشكل لحظي ----------------------
+# ---------------------- تتبع التوصيات المفتوحة بشكل لحظي ----------------------
 def improved_track_signals():
     logger.info("بدء خدمة تتبع التوصيات المفتوحة (الصفقات)")
     while True:
@@ -618,11 +605,11 @@ def improved_track_signals():
                 WHERE achieved_target = FALSE AND hit_stop_loss = FALSE AND closed_at IS NULL
             """)
             active_signals = cur.fetchall()
-            # تتبع التوصيات المفتوحة فورياً
+            logger.debug(f"عدد التوصيات المفتوحة الحالية: {len(active_signals)}")
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss, dynamic_stop_loss, sent_at = signal
-                current_price = last_price_update.get(symbol, None)
-                if not current_price:
+                current_price = last_price_update.get(symbol)
+                if current_price is None:
                     logger.debug(f"{symbol}: لم يتم تحديث السعر الحالي بعد")
                     continue
 
@@ -636,7 +623,7 @@ def improved_track_signals():
                 time_in_trade = (datetime.now(timezone) - sent_at).total_seconds() / 3600
                 price_change_pct = (current_price - entry) / entry * 100
 
-                # حساب وقف الخسارة المتحرك الجديد
+                # حساب وتحديث وقف الخسارة المتحرك
                 if current_price > entry:
                     pct_based_stop = entry + (current_price - entry) * 0.5
                     atr_based_stop = current_price - current_atr * 1.5
@@ -658,10 +645,10 @@ def improved_track_signals():
                     ]
                     new_dynamic_stop_loss = max(candidate_stops)
                     if new_dynamic_stop_loss > dynamic_stop_loss * 1.005:
-                        cur.execute("UPDATE signals SET dynamic_stop_loss = %s WHERE id = %s",
+                        cur.execute("UPDATE signals SET dynamic_stop_loss = %s WHERE id = %s", 
                                     (float(new_dynamic_stop_loss), int(signal_id)))
                         conn.commit()
-                        logger.info(f"{symbol}: تم تحديث وقف الخسارة المتحرك من {dynamic_stop_loss:.8f} إلى {new_dynamic_stop_loss:.8f}")
+                        logger.info(f"{symbol}: تحديث وقف الخسارة المتحرك من {dynamic_stop_loss:.8f} إلى {new_dynamic_stop_loss:.8f}")
                         if new_dynamic_stop_loss > dynamic_stop_loss * 1.05:
                             msg = (
                                 f"📊 **تحديث وقف الخسارة - {symbol}** 📊\n"
@@ -687,7 +674,7 @@ def improved_track_signals():
                     if new_target and abs(new_target - target) / target > 0.01:
                         cur.execute("UPDATE signals SET target = %s WHERE id = %s", (float(new_target), int(signal_id)))
                         conn.commit()
-                        logger.info(f"{symbol}: تم تغيير الهدف من {target:.8f} إلى {new_target:.8f}")
+                        logger.info(f"{symbol}: تغيير الهدف من {target:.8f} إلى {new_target:.8f}")
                         msg = (
                             f"🔄 **تغيير الهدف - {symbol}**\n"
                             "----------------------------------------\n"
@@ -700,7 +687,7 @@ def improved_track_signals():
                 except Exception as e:
                     logger.error(f"{symbol}: خطأ في إعادة حساب الهدف: {e}")
 
-                # إغلاق الصفقة إذا تحقق الهدف أو تفعيل وقف الخسارة
+                # إغلاق الصفقة عند تحقيق الهدف أو تفعيل وقف الخسارة
                 if current_price >= target:
                     profit = ((current_price - entry) / entry) * 100
                     msg = (
@@ -736,12 +723,11 @@ def improved_track_signals():
             release_db_connection(conn)
         time.sleep(90)
 
-# ---------------------- فحص الأزواج وإصدار التوصيات ----------------------
+# ---------------------- فحص الأزواج وإصدار توصيات جديدة ----------------------
 def analyze_market():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
-        # التأكد من أن عدد الصفقات المفتوحة لا يتجاوز 4
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
         active_signals_count = cur.fetchone()[0]
         if active_signals_count >= 4:
@@ -803,9 +789,9 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"استثناء أثناء تسجيل webhook: {e}")
     
-    Thread(target=run_flask, daemon=True).start()
-    Thread(target=improved_track_signals, daemon=True).start()
     Thread(target=run_ticker_socket_manager, daemon=True).start()
+    Thread(target=improved_track_signals, daemon=True).start()
+    Thread(target=run_flask, daemon=True).start()
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=10)
     scheduler.start()
