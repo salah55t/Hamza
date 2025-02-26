@@ -20,7 +20,7 @@ from cachetools import TTLCache
 
 # ---------------------- إعدادات التسجيل (Logs) ----------------------
 logging.basicConfig(
-    level=logging.DEBUG,  # مستوى التصحيح لتتبع كل العمليات
+    level=logging.DEBUG,  # لتفصيل السجلات بشكل لحظي
     format='%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s',
     handlers=[logging.FileHandler('crypto_bot.log'), logging.StreamHandler()]
 )
@@ -378,6 +378,7 @@ def send_report(chat_id_callback):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
+        # جلب آخر 10 صفقة رابحة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
             FROM signals 
@@ -386,6 +387,7 @@ def send_report(chat_id_callback):
             LIMIT 10
         """)
         winning_trades = cur.fetchall()
+        # جلب آخر 10 صفقة خاسرة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at, closed_at 
             FROM signals 
@@ -394,6 +396,7 @@ def send_report(chat_id_callback):
             LIMIT 10
         """)
         losing_trades = cur.fetchall()
+        # جلب آخر 10 صفقة مفتوحة
         cur.execute("""
             SELECT symbol, entry_price, target, stop_loss, dynamic_stop_loss, sent_at 
             FROM signals 
@@ -402,12 +405,33 @@ def send_report(chat_id_callback):
             LIMIT 10
         """)
         open_trades = cur.fetchall()
+        
+        # استعلامات إضافية لحساب الإحصائيات
+        cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
+        open_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NOT NULL")
+        closed_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM signals WHERE achieved_target = TRUE")
+        win_count = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM signals WHERE hit_stop_loss = TRUE")
+        lose_count = cur.fetchone()[0]
+        cur.execute("SELECT AVG((target/entry_price - 1)*100) FROM signals WHERE achieved_target = TRUE")
+        avg_win = cur.fetchone()[0] or 0
+        cur.execute("SELECT AVG(ABS((stop_loss/entry_price - 1)*100)) FROM signals WHERE hit_stop_loss = TRUE")
+        avg_loss = cur.fetchone()[0] or 0
+        
         release_db_connection(conn)
+        
         report_message = (
             "📊✨ **تقرير أداء التداول الشامل** ✨📊\n"
             f"🕒 محدث بتاريخ: {datetime.now(timezone).strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"🔹 عدد التوصيات المفتوحة: {open_count}\n"
+            f"🔹 عدد التوصيات المغلقة: {closed_count}\n"
+            f"🏆 التوصيات الناجحة: {win_count} (متوسط ربح: +{avg_win:.2f}%)\n"
+            f"❌ التوصيات الخاسرة: {lose_count} (متوسط خسارة: -{avg_loss:.2f}%)\n\n"
         )
-        report_message += "🏆 **الصفقات الرابحة** 🏆\n"
+        
+        report_message += "🏆 **الصفقات الرابحة (آخر 10)** 🏆\n"
         if winning_trades:
             for trade in winning_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
@@ -428,7 +452,8 @@ def send_report(chat_id_callback):
                 )
         else:
             report_message += "🤷‍♂️ لا توجد صفقات رابحة بعد.\n\n"
-        report_message += "❌ **الصفقات الخاسرة** ❌\n"
+        
+        report_message += "❌ **الصفقات الخاسرة (آخر 10)** ❌\n"
         if losing_trades:
             for trade in losing_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at, closed_at = trade
@@ -448,7 +473,8 @@ def send_report(chat_id_callback):
                 )
         else:
             report_message += "✅ لا توجد صفقات خاسرة بعد.\n\n"
-        report_message += "⏳ **الصفقات المفتوحة** ⏳\n"
+        
+        report_message += "⏳ **الصفقات المفتوحة (آخر 10)** ⏳\n"
         if open_trades:
             for trade in open_trades:
                 symbol, entry, target, stop_loss, dyn_stop, sent_at = trade
@@ -463,6 +489,7 @@ def send_report(chat_id_callback):
                 )
         else:
             report_message += "🕒 لا توجد صفقات مفتوحة حالياً.\n\n"
+        
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {"chat_id": chat_id, "text": report_message, "parse_mode": "Markdown"}
         response = requests.post(url, json=payload, timeout=10)
@@ -623,7 +650,7 @@ def improved_track_signals():
                 time_in_trade = (datetime.now(timezone) - sent_at).total_seconds() / 3600
                 price_change_pct = (current_price - entry) / entry * 100
 
-                # حساب وتحديث وقف الخسارة المتحرك
+                # تحديث وقف الخسارة المتحرك
                 if current_price > entry:
                     pct_based_stop = entry + (current_price - entry) * 0.5
                     atr_based_stop = current_price - current_atr * 1.5
@@ -728,6 +755,7 @@ def analyze_market():
     conn = get_db_connection()
     try:
         cur = conn.cursor()
+        # التأكد من أن عدد الصفقات المفتوحة لا يتجاوز 4
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
         active_signals_count = cur.fetchone()[0]
         if active_signals_count >= 4:
