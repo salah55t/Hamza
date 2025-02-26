@@ -214,12 +214,12 @@ class ImprovedDayTradingStrategy:
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
-            (df['ema5'] > df['ema13']) &  # تقاطع EMA
-            (df['rsi'].between(30, 70)) &  # توسيع نطاق RSI
-            (df['close'] > df['vwap']) &
+            (df['ema5'] > df['ema13']) &
+            (df['rsi'].between(25, 75)) &  # توسيع نطاق RSI
+            # (df['close'] > df['vwap']) &  # إزالة شرط الـ VWAP لتخفيف القيود
             (df['macd'] > df['macd_signal']) &
-            ((df['%K'] > df['%D']) & (df['%K'] < 90)) &  # تخفيف شرط Stochastic (تصحيح الأقواس)
-            (df['volume'] > df['volume'].rolling(window=10).mean())  # تقليل شرط الحجم
+            (df['%K'] > df['%D'])         # تبسيط شرط Stochastic
+            # يمكن تعديل شرط الحجم أو إزالته إذا لزم الأمر
         )
         df.loc[conditions, 'buy'] = 1
         logger.debug(f"شروط الشراء: {conditions.iloc[-1]}")
@@ -285,7 +285,8 @@ def generate_improved_signal(df, symbol):
         last_row, candle_pattern, risk_reward_ratio, market_volatility
     )
     
-    if risk_reward_ratio < 1.8 or confidence_score < 70:
+    # تخفيف الشروط: تقليل عتبة نسبة المخاطرة/العائد ودرجة الثقة
+    if risk_reward_ratio < 1.5 or confidence_score < 60:
         return None
     if reward / current_price < 0.01:
         return None
