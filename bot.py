@@ -192,9 +192,9 @@ class ImprovedDayTradingStrategy:
         # المؤشرات الحالية مع تحسينات
         df['ema5'] = calculate_ema(df['close'], 5)
         df['ema13'] = calculate_ema(df['close'], 13)
-        df['ema21'] = calculate_ema(df['close'], 21)  # إضافة EMA إضافي
+        df['ema21'] = calculate_ema(df['close'], 21)
         df['rsi'] = calculate_rsi_indicator(df, period=7)
-        df['rsi_divergence'] = df['rsi'].diff(3)  # مؤشر اختلاف RSI
+        df['rsi_divergence'] = df['rsi'].diff(3)
         
         # حساب Bollinger Bands
         df['ma20'] = df['close'].rolling(window=20).mean()
@@ -202,7 +202,7 @@ class ImprovedDayTradingStrategy:
         df['upper_band'] = df['ma20'] + (std20 * 2)
         df['lower_band'] = df['ma20'] - (std20 * 2)
         
-        # باقي المؤشرات كما هي
+        # باقي المؤشرات
         df['vwap'] = (df['close'] * df['volume']).cumsum() / df['volume'].cumsum()
         df = calculate_atr_indicator(df, period=7)
         df = calculate_macd_indicator(df)
@@ -216,7 +216,7 @@ class ImprovedDayTradingStrategy:
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
             (df['ema5'] > df['ema13']) &
-            (df['rsi'].between(25, 75)) &  # توسيع نطاق RSI
+            (df['rsi'].between(25, 75)) &
             (df['macd'] > df['macd_signal']) &
             (df['%K'] > df['%D'])
         )
@@ -227,7 +227,7 @@ class ImprovedDayTradingStrategy:
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (
             (df['ema5'] < df['ema13']) |
-            (df['rsi'] > 80) |  # زيادة الحد الأعلى لـ RSI
+            (df['rsi'] > 80) |
             (df['macd'] < df['macd_signal']) |
             (df['%K'] < df['%D'])
         )
@@ -237,7 +237,6 @@ class ImprovedDayTradingStrategy:
 
 # ---------------------- دالة توليد الإشارة المحسنة للتداول اليومي ----------------------
 def generate_improved_signal(df, symbol):
-    # الفلترة الأولية للبيانات
     if len(df) < 50:
         logger.info(f"{symbol}: تم رفض التوصية - البيانات غير كافية (عدد الصفوف: {len(df)})")
         return None
@@ -251,18 +250,15 @@ def generate_improved_signal(df, symbol):
         logger.info(f"{symbol}: تم رفض التوصية - شروط الشراء غير مستوفاة")
         return None
     
-    # تحسين أنماط الشموع
     candle_pattern = analyze_candle_pattern(df)
     if not candle_pattern['bullish']:
         logger.info(f"{symbol}: تم رفض التوصية - نمط الشموع غير صاعد (bullish not detected)")
         return None
     
-    # تحليل تقلبات السوق
     market_volatility = df['atr'].iloc[-1] / df['close'].iloc[-1]
     current_price = last_row['close']
     atr = last_row['atr']
     
-    # تحديد مستويات المقاومة والدعم
     resistance = last_row['resistance']
     support = last_row['support']
     price_range = resistance - support
@@ -290,7 +286,6 @@ def generate_improved_signal(df, symbol):
         return None
     
     dynamic_stop_loss = stop_loss
-    
     signal = {
         'symbol': symbol,
         'price': float(format(current_price, '.8f')),
@@ -321,15 +316,13 @@ def generate_improved_signal(df, symbol):
     return signal
 
 def select_best_target_level(current_price, fib_levels, recent_highs):
-    """اختيار أفضل هدف بناءً على مستويات الارتداد السابقة"""
     for level in fib_levels:
         for high in recent_highs:
-            if abs(high - level) / level < 0.01:  # ضمن نطاق 1%
+            if abs(high - level) / level < 0.01:
                 return min(level, high * 0.998)
     return fib_levels[1]
 
 def analyze_candle_pattern(df):
-    """تحليل أنماط الشموع في آخر 3 شمعات"""
     last_candles = df.iloc[-3:].copy()
     last_candles['body'] = abs(last_candles['close'] - last_candles['open'])
     last_candles['upper_shadow'] = last_candles['high'] - last_candles[['open', 'close']].max(axis=1)
@@ -353,9 +346,7 @@ def analyze_candle_pattern(df):
     return pattern
 
 def calculate_confidence_score(indicators, candle_pattern, risk_reward_ratio, volatility):
-    """حساب درجة الثقة في الإشارة من 0 إلى 100"""
-    score = 60  # نقطة البداية
-    
+    score = 60
     if indicators['rsi'] < 40:
         score += 5
     elif indicators['rsi'] > 65:
@@ -657,7 +648,7 @@ def send_telegram_alert_special(message):
     except Exception as e:
         logger.error(f"خطأ في send_telegram_alert_special: {e}")
 
-# ---------------------- خدمة تتبع الإشارات مع وقف خسارة متحرك ----------------------
+# ---------------------- خدمة تتبع الإشارات مع وقف خسارة متحرك وتحديث الهدف ----------------------
 def improved_track_signals():
     logger.info("بدء خدمة تتبع الإشارات المحسنة")
     
@@ -675,17 +666,13 @@ def improved_track_signals():
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss, dynamic_stop_loss, sent_at = signal
                 current_price = last_price_update.get(symbol, None)
-                
                 if not current_price:
                     logger.debug(f"{symbol}: لم يتم تحديث السعر الحالي بعد")
                     continue
-                    
+                
                 df = fetch_historical_data(symbol, interval='5m', days=1)
-                if df is None:
-                    logger.info(f"{symbol}: تم تجاهل التوصية - عدم توفر البيانات التاريخية")
-                    continue
-                if len(df) < 20:
-                    logger.info(f"{symbol}: تم تجاهل التوصية - البيانات التاريخية غير كافية (عدد الصفوف: {len(df)})")
+                if df is None or len(df) < 20:
+                    logger.info(f"{symbol}: تم تجاهل التوصية - البيانات التاريخية غير كافية")
                     continue
                     
                 df = calculate_atr_indicator(df)
@@ -723,7 +710,6 @@ def improved_track_signals():
                                    (new_dynamic_stop_loss, signal_id))
                         conn.commit()
                         logger.info(f"{symbol}: تحديث وقف الخسارة المتحرك من {dynamic_stop_loss:.8f} إلى {new_dynamic_stop_loss:.8f}")
-                        
                         if new_dynamic_stop_loss > dynamic_stop_loss * 1.05:
                             msg = (
                                 f"📊 **تحديث وقف الخسارة - {symbol}** 📊\n"
@@ -737,6 +723,30 @@ def improved_track_signals():
                             send_telegram_alert_special(msg)
                 else:
                     new_dynamic_stop_loss = stop_loss
+                
+                # تحديث الهدف بناءً على البيانات الحديثة وإرسال تنبيه عند تغييره
+                try:
+                    new_resistance = df['high'].rolling(window=20).max().iloc[-1]
+                    new_support = df['low'].rolling(window=20).min().iloc[-1]
+                    new_price_range = new_resistance - new_support
+                    new_fib_levels = [current_price + new_price_range * level for level in [0.382, 0.618, 0.786]]
+                    recent_highs = np.sort(df['high'].tail(20).values)
+                    new_target = select_best_target_level(current_price, new_fib_levels, recent_highs)
+                    if new_target and abs(new_target - target) / target > 0.01:
+                        cur.execute("UPDATE signals SET target = %s WHERE id = %s", (new_target, signal_id))
+                        conn.commit()
+                        logger.info(f"{symbol}: تغيير الهدف من {target:.8f} إلى {new_target:.8f}")
+                        msg = (
+                            f"🔄 **تغيير الهدف - {symbol}**\n"
+                            "----------------------------------------\n"
+                            f"🎯 الهدف القديم: ${target:.8f}\n"
+                            f"🎯 الهدف الجديد: ${new_target:.8f}\n"
+                            f"⏰ الوقت: {datetime.now(timezone).strftime('%H:%M:%S')}"
+                        )
+                        send_telegram_alert_special(msg)
+                        target = new_target
+                except Exception as e:
+                    logger.error(f"{symbol}: خطأ في إعادة حساب الهدف: {e}")
                 
                 if current_price >= target:
                     profit = ((current_price - entry) / entry) * 100
