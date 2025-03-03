@@ -53,6 +53,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
+        # إضافة أعمدة جديدة: stage لتتبع المرحلة، target_multiplier و stop_loss_multiplier
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -62,6 +63,9 @@ def init_db():
                 stop_loss DOUBLE PRECISION,
                 r2_score DOUBLE PRECISION,
                 volume_15m DOUBLE PRECISION,
+                stage INTEGER DEFAULT 1,
+                target_multiplier DOUBLE PRECISION,
+                stop_loss_multiplier DOUBLE PRECISION,
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
@@ -143,35 +147,51 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
-# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot ----------------------
+# ---------------------- دالة التحقق من نماذج الشموع ومستويات الدعم والمقاومة ----------------------
+def check_candlestick_pattern_and_support_resistance(df):
+    if len(df) < 2:
+        return False
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    bullish_engulfing = (prev_candle['close'] < prev_candle['open']) and \
+                        (last_candle['close'] > last_candle['open']) and \
+                        (last_candle['open'] < prev_candle['close']) and \
+                        (last_candle['close'] > prev_candle['open'])
+    window = 20
+    support = df['low'].rolling(window=window).min().iloc[-1]
+    near_support = (last_candle['close'] - support) / support <= 0.02
+    return bullish_engulfing and near_support
+
+# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot مع الهدف ووقف الخسارة الديناميكيين ----------------------
 def generate_signal_using_hummingbot_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if df.empty:
         return None
-
-    # استخدام السعر الأخير كمرجع
     current_price = df.iloc[-1]['close']
-    # تحديد نسبة السبريد (مثلاً 0.5%)
+    df = calculate_atr_indicator(df, period=14)
+    atr = df.iloc[-1]['atr']
+    target_multiplier = 2    # الهدف = سعر الدخول + 2×ATR
+    stop_loss_multiplier = 1 # وقف الخسارة = سعر الدخول - 1×ATR
     spread = 0.005
-    # سعر الشراء يكون أقل من السعر الحالي بنسبة السبريد
     buy_price = current_price * (1 - spread)
-    # سعر البيع يكون أعلى من السعر الحالي بنسبة السبريد
-    sell_price = current_price * (1 + spread)
-    # تحديد وقف الخسارة بنسبة 1% أقل من سعر الشراء
-    stop_loss = buy_price * 0.99
-
+    target = buy_price + target_multiplier * atr
+    stop_loss = buy_price - stop_loss_multiplier * atr
     signal = {
-            'symbol': symbol,
-            'price': float(format(buy_price, '.8f')),
-            'target': float(format(sell_price, '.8f')),
-            'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'hummingbot_market_making',
-            'indicators': {
-                'spread': spread,
-                'reference_price': current_price,
-            },
-            'trade_value': TRADE_VALUE
-        }
+        'symbol': symbol,
+        'price': float(format(buy_price, '.8f')),
+        'target': float(format(target, '.8f')),
+        'stop_loss': float(format(stop_loss, '.8f')),
+        'strategy': 'hummingbot_market_making',
+        'indicators': {
+            'spread': spread,
+            'reference_price': current_price,
+            'atr': atr,
+            'target_multiplier': target_multiplier,
+            'stop_loss_multiplier': stop_loss_multiplier
+        },
+        'trade_value': TRADE_VALUE,
+        'stage': 1
+    }
     logger.info(f"تم توليد إشارة من استراتيجية Hummingbot للزوج {symbol}: {signal}")
     return signal
 
@@ -196,7 +216,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-1.onrender.com/webhook"
+    webhook_url = "https://hamza-drs4.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -274,7 +294,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
         rtl_mark = "\u200F"
         message = (
             f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
-            f"▫️ السعر المتوقع: ${signal['price']}\n"
+            f"▫️ سعر الدخول: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
             f"📏 السبريد: {signal['indicators'].get('spread', 'N/A')}\n"
@@ -380,14 +400,14 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات ----------------------
+# ---------------------- خدمة تتبع الإشارات مع وقف خسارة متحرك ----------------------
 def track_signals():
     logger.info("بدء خدمة تتبع الإشارات...")
     while True:
         try:
             check_db_connection()
             cur.execute("""
-                SELECT id, symbol, entry_price, target, stop_loss 
+                SELECT id, symbol, entry_price, target, stop_loss, stage, target_multiplier, stop_loss_multiplier
                 FROM signals 
                 WHERE achieved_target = FALSE 
                   AND hit_stop_loss = FALSE 
@@ -396,34 +416,55 @@ def track_signals():
             active_signals = cur.fetchall()
             logger.info(f"تم العثور على {len(active_signals)} إشارة نشطة للتتبع")
             for signal in active_signals:
-                signal_id, symbol, entry, target, stop_loss = signal
+                signal_id, symbol, entry, target, stop_loss, stage, target_multiplier, stop_loss_multiplier = signal
                 try:
                     if symbol in ticker_data:
                         current_price = float(ticker_data[symbol].get('c', 0))
                     else:
                         logger.warning(f"لا يوجد تحديث أسعار لحظة {symbol} من WebSocket")
                         continue
-                    logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
-                    if abs(entry) < 1e-8:
-                        logger.warning(f"سعر الدخول للزوج {symbol} صفر تقريباً، سيتم استخدام السعر الحالي ({current_price}) بدلاً منه.")
-                        entry = current_price
+                    logger.info(f"فحص {symbol}: السعر الحالي {current_price}, الدخول {entry}, الهدف {target}, وقف الخسارة {stop_loss}, المرحلة {stage}")
+                    
+                    # في حالة وصول السعر إلى الهدف، نقوم بتحديث وقف الخسارة والهدف (Trailing Stop)
                     if current_price >= target:
-                        profit = ((current_price - entry) / entry) * 100
+                        # إعادة جلب البيانات التاريخية وحساب ATR الجديد
+                        df = fetch_historical_data(symbol)
+                        if df is None or len(df) < 50:
+                            logger.warning(f"بيانات تاريخية غير كافية لتحديث {symbol}")
+                            continue
+                        df = calculate_atr_indicator(df, period=14)
+                        atr = df.iloc[-1]['atr']
+                        
+                        old_target = target
+                        if stage == 1:
+                            new_stop_loss = entry  # المرحلة الأولى: يصبح سعر الدخول هو وقف الخسارة
+                        else:
+                            new_stop_loss = target  # في المراحل التالية: يصبح الهدف السابق هو وقف الخسارة
+                        new_target = target + target_multiplier * atr
+                        new_stage = stage + 1
+                        
                         msg = (
-                            f"🎉 **تحقيق الهدف - {symbol}**\n"
-                            f"• سعر الدخول: ${entry:.8f}\n"
-                            f"• سعر الخروج: ${current_price:.8f}\n"
-                            f"• الربح: +{profit:.2f}%\n"
+                            f"🎉 **تحديث الهدف والوقف - {symbol}**\n"
+                            f"• الهدف السابق: ${old_target:.8f}\n"
+                            f"• وقف الخسارة الجديد: ${new_stop_loss:.8f}\n"
+                            f"• الهدف الجديد: ${new_target:.8f}\n"
+                            f"• المرحلة: {new_stage}\n"
                             f"⏱ {get_gmt_plus1_time().strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
                         try:
-                            cur.execute("UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
+                            cur.execute("""
+                                UPDATE signals 
+                                SET target = %s, stop_loss = %s, stage = %s
+                                WHERE id = %s
+                            """, (new_target, new_stop_loss, new_stage, signal_id))
                             conn.commit()
-                            logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف")
+                            logger.info(f"تم تحديث {symbol}: الهدف {new_target}, وقف الخسارة {new_stop_loss}, المرحلة {new_stage}")
                         except Exception as e:
-                            logger.error(f"فشل تحديث الإشارة بعد تحقيق الهدف للزوج {symbol}: {e}")
+                            logger.error(f"فشل تحديث {symbol}: {e}")
                             conn.rollback()
+                    
+                    # إذا وصل السعر إلى وقف الخسارة، يتم تفعيل وقف الخسارة وإغلاق الإشارة
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
@@ -437,12 +478,12 @@ def track_signals():
                         try:
                             cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
                             conn.commit()
-                            logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تفعيل وقف الخسارة")
+                            logger.info(f"تم إغلاق {symbol} بعد تفعيل وقف الخسارة")
                         except Exception as e:
-                            logger.error(f"فشل تحديث الإشارة بعد تفعيل وقف الخسارة للزوج {symbol}: {e}")
+                            logger.error(f"فشل تحديث {symbol} بعد تفعيل وقف الخسارة: {e}")
                             conn.rollback()
                 except Exception as e:
-                    logger.error(f"خطأ في تتبع الزوج {symbol}: {e}")
+                    logger.error(f"خطأ في تتبع {symbol}: {e}")
                     conn.rollback()
                     continue
             time.sleep(60)
@@ -472,7 +513,7 @@ def analyze_market():
         logger.warning("لا توجد أزواج في الملف!")
         return
     for symbol in symbols:
-        logger.info(f"بدء فحص الزوج: {symbol}")
+        logger.info(f"بدء فحص {symbol}...")
         try:
             df = fetch_historical_data(symbol)
             if df is None or len(df) < 100:
@@ -483,7 +524,12 @@ def analyze_market():
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
                 continue
 
-            # استخدام استراتيجية Hummingbot لتوليد الإشارة
+            # التحقق من نماذج الشموع ومستويات الدعم/المقاومة
+            if not check_candlestick_pattern_and_support_resistance(df):
+                logger.info(f"تجاهل {symbol} - لا يستوفي شروط نموذج الشموع أو الدعم/المقاومة")
+                continue
+
+            # توليد الإشارة باستخدام استراتيجية Hummingbot
             signal = generate_signal_using_hummingbot_strategy(df, symbol)
             if not signal:
                 continue
@@ -493,15 +539,18 @@ def analyze_market():
             try:
                 cur.execute("""
                     INSERT INTO signals 
-                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m, stage, target_multiplier, stop_loss_multiplier)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     signal['symbol'],
                     signal['price'],
                     signal['target'],
                     signal['stop_loss'],
                     signal.get('confidence', 100),
-                    volume_15m
+                    volume_15m,
+                    signal['stage'],
+                    signal['indicators']['target_multiplier'],
+                    signal['indicators']['stop_loss_multiplier']
                 ))
                 conn.commit()
                 logger.info(f"تم إدخال الإشارة بنجاح للزوج {symbol}")
@@ -510,7 +559,7 @@ def analyze_market():
                 conn.rollback()
             time.sleep(1)
         except Exception as e:
-            logger.error(f"خطأ في معالجة الزوج {symbol}: {e}")
+            logger.error(f"خطأ في معالجة {symbol}: {e}")
             conn.rollback()
             continue
     logger.info("انتهى فحص جميع الأزواج")
