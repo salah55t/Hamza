@@ -9,3 +9,4 @@ APScheduler
 requests
 xgboost
 cachetools
+TA-Lib
