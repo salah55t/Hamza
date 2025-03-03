@@ -1,2 +1,0 @@
-libta-lib0
-libta-lib-dev
