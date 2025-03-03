@@ -77,7 +77,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
-        # إنشاء جدول الإشارات مع الأعمدة المطلوبة
+        # إنشاء الجدول الأساسي في حال عدم وجوده
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -87,9 +87,6 @@ def init_db():
                 stop_loss DOUBLE PRECISION,
                 r2_score DOUBLE PRECISION,
                 volume_15m DOUBLE PRECISION,
-                stage INTEGER DEFAULT 1,
-                target_multiplier DOUBLE PRECISION DEFAULT 2,
-                stop_loss_multiplier DOUBLE PRECISION DEFAULT 1,
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
@@ -98,7 +95,16 @@ def init_db():
             )
         """)
         conn.commit()
-        logger.info("تم تهيئة قاعدة البيانات بنجاح")
+        # استخدام ALTER TABLE لإضافة الأعمدة الجديدة إذا لم تكن موجودة
+        alter_queries = [
+            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS stage INTEGER DEFAULT 1",
+            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS target_multiplier DOUBLE PRECISION DEFAULT 2",
+            "ALTER TABLE signals ADD COLUMN IF NOT EXISTS stop_loss_multiplier DOUBLE PRECISION DEFAULT 1"
+        ]
+        for query in alter_queries:
+            cur.execute(query)
+        conn.commit()
+        logger.info("تم تهيئة قاعدة البيانات بنجاح مع الأعمدة المحدثة")
     except Exception as e:
         logger.error(f"فشل تهيئة قاعدة البيانات: {e}")
         raise
@@ -192,7 +198,6 @@ def calculate_atr_indicator(df, period=14):
 
 # ---------------------- دالة فحص شروط التداول الدقيقة ----------------------
 def check_trade_conditions(df, buy_price, target, stop_loss):
-    # حساب نسبة مخاطرة/عائد
     risk = buy_price - stop_loss
     reward = target - buy_price
     rr_ratio = reward / risk if risk != 0 else 0
@@ -200,25 +205,21 @@ def check_trade_conditions(df, buy_price, target, stop_loss):
         logger.info(f"نسبة مخاطرة/عائد {rr_ratio:.2f} أقل من المطلوب")
         return False
 
-    # حساب مؤشرات EMA (5,13)
     df = calculate_ema_values(df)
     if df.iloc[-1]['ema5'] <= df.iloc[-1]['ema13']:
         logger.info("EMA5 لم تتجاوز EMA13")
         return False
 
-    # حساب RSI لفترة 7 - عدم وصوله لمستوى الشراء المفرط
     rsi = calculate_rsi_indicator(df, period=7)
     if rsi.iloc[-1] >= 70:
         logger.info(f"RSI مرتفع ({rsi.iloc[-1]:.2f}) مما يشير لتشبع شرائي")
         return False
 
-    # حساب MACD والتأكد من أن MACD فوق خط الإشارة
     df = calculate_macd(df)
     if df.iloc[-1]['macd'] <= df.iloc[-1]['macd_signal']:
         logger.info("MACD لم يتجاوز خط الإشارة")
         return False
 
-    # حساب Stochastic والتأكد من وجود تقاطع صعودي وعدم بلوغه مستويات تشبع شرائي
     df = calculate_stochastic(df)
     if df.iloc[-1]['stochastic_k'] <= df.iloc[-1]['stochastic_d'] or df.iloc[-1]['stochastic_k'] > 80:
         logger.info("شروط Stochastic لم تتحقق")
@@ -296,7 +297,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-drs4.onrender.com/webhook"
+    webhook_url = "https://hamza-1.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -599,22 +600,18 @@ def analyze_market():
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
             volume_15m = fetch_recent_volume(symbol)
-            # تحديث شرط السيولة: يجب أن تتجاوز 100,000 USDT في 15 دقيقة
             if volume_15m < 100000:
                 logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f} USDT")
                 continue
 
-            # التحقق من نماذج الشموع ومستويات الدعم/المقاومة
             if not check_candlestick_pattern_and_support_resistance(df):
                 logger.info(f"تجاهل {symbol} - لا يستوفي شروط نموذج الشموع أو الدعم/المقاومة")
                 continue
 
-            # توليد الإشارة باستخدام استراتيجية Hummingbot
             signal = generate_signal_using_hummingbot_strategy(df, symbol)
             if not signal:
                 continue
 
-            # التحقق من شروط التداول الدقيقة:
             buy_price = signal['price']
             target = signal['target']
             stop_loss = signal['stop_loss']
