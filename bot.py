@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 import numpy as np
-import talib as ta
+import pandas_ta as ta
 import psycopg2
 import requests
 from flask import Flask, request
@@ -75,18 +75,13 @@ class DayTradingStrategy:
     def calculate_indicators(self, df):
         """
         حساب المؤشرات الفنية على البيانات.
-        
-        المعلمات:
-            df (DataFrame): يحتوي على OHLCV.
-            
-        العائد:
-            DataFrame: مع المؤشرات المحسوبة.
         """
         df = df.copy()
-        df['RSI'] = ta.RSI(df['close'], timeperiod=self.rsi_period)
-        df['EMA_short'] = ta.EMA(df['close'], timeperiod=self.ema_short)
-        df['EMA_long'] = ta.EMA(df['close'], timeperiod=self.ema_long)
-        df['ATR'] = ta.ATR(df['high'], df['low'], df['close'], timeperiod=self.atr_period)
+        # استخدام pandas_ta لحساب المؤشرات
+        df['RSI'] = ta.rsi(df['close'], length=self.rsi_period)
+        df['EMA_short'] = ta.ema(df['close'], length=self.ema_short)
+        df['EMA_long'] = ta.ema(df['close'], length=self.ema_long)
+        df['ATR'] = ta.atr(high=df['high'], low=df['low'], close=df['close'], length=self.atr_period)
         # حساب تقاطع المتوسطات المتحركة
         df['EMA_cross'] = 0
         df.loc[(df['EMA_short'] > df['EMA_long']) & (df['EMA_short'].shift(1) <= df['EMA_long'].shift(1)), 'EMA_cross'] = 1   # تقاطع صاعد
@@ -96,12 +91,6 @@ class DayTradingStrategy:
     def find_entry_exit_points(self, df):
         """
         تحديد نقاط الدخول والخروج بناءً على الاستراتيجية.
-        
-        المعلمات:
-            df (DataFrame): يحتوي على المؤشرات الفنية.
-            
-        العائد:
-            DataFrame: مع إشارات الدخول والخروج ووقف الخسارة وهدف الربح.
         """
         df = df.copy()
         df['entry_signal'] = 0
@@ -133,29 +122,22 @@ class DayTradingStrategy:
     def get_latest_signal(self, df):
         """
         استخراج أحدث إشارة دخول من البيانات.
-        
-        العائد:
-            dict: يحتوي على اتجاه الإشارة، سعر الدخول، وقف الخسارة وهدف الربح؛ أو None.
         """
         if df.empty:
             return None
         last_row = df.iloc[-1]
         if last_row['entry_signal'] != 0:
-            signal = {
+            return {
                 'direction': int(last_row['entry_signal']),
                 'price': float(last_row['close']),
                 'stop_loss': float(last_row['stop_loss']),
                 'target': float(last_row['take_profit'])
             }
-            return signal
         return None
 
     def run_strategy(self, df):
         """
-        تشغيل الاستراتيجية بالكامل على البيانات.
-        
-        العائد:
-            DataFrame: يحتوي على النتائج مع المؤشرات والإشارات.
+        تشغيل الاستراتيجية بالكامل.
         """
         df = self.calculate_indicators(df)
         df = self.find_entry_exit_points(df)
@@ -434,12 +416,10 @@ def track_signals():
                         if df is None or len(df) < 50:
                             logger.warning(f"بيانات غير كافية لتحديث {symbol}")
                             continue
-                        df = pd.DataFrame(df)  # التأكد من صيغة البيانات
-                        df = df.astype({'open': float, 'high': float, 'low': float, 'close': float})
-                        df = df.reset_index(drop=True)
-                        # حساب ATR لتحديث الهدف ووقف الخسارة
-                        df = ta.ATR(df['high'], df['low'], df['close'], timeperiod=14)
-                        atr = df.iloc[-1] if not df.empty else 0
+                        df = df.astype({'open': float, 'high': float, 'low': float, 'close': float}).reset_index(drop=True)
+                        # حساب ATR باستخدام pandas_ta
+                        df['ATR'] = ta.atr(high=df['high'], low=df['low'], close=df['close'], length=14)
+                        atr = df['ATR'].iloc[-1] if not df['ATR'].empty else 0
                         old_target = target
                         if stage == 1:
                             new_stop_loss = entry
@@ -528,7 +508,6 @@ def analyze_market():
             if not latest_signal:
                 logger.info(f"{symbol}: لم يتم العثور على إشارة دخول جديدة")
                 continue
-            # إعداد بيانات الإشارة
             signal = {
                 'symbol': symbol,
                 'price': latest_signal['price'],
