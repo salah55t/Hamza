@@ -7,6 +7,5 @@ scikit-learn
 python-decouple
 APScheduler
 requests
-xgboost
 cachetools
-TA-Lib
+pandas_ta
