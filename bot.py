@@ -1,4 +1,28 @@
 #!/usr/bin/env python
+"""
+📈 ماهية البوت؟
+نظام ذكي يحلل السوق ويولد إشارات تداول دقيقة لتعزيز قراراتك الاستثمارية بسهولة وكفاءة.
+
+🔍 اختيار الصفقات  
+- الفلترة الأولية: اختيار الأزواج بسيولة تزيد عن 100,000 USDT خلال 15 دقيقة.  
+- المؤشرات الفنية:  
+  - EMA (5 و13): لرصد الاتجاهات.  
+  - RSI (7): لقياس الزخم.  
+  - MACD: لتأكيد التحركات.  
+  - Stochastic: لتحديد النقاط المثالية.  
+- شروط دقيقة: تقاطع المؤشرات مع نسبة مخاطرة/عائد فوق 2.5.
+
+🚀 الوظائف والخصائص  
+- تنبيهات Telegram فورية 📩  
+- وقف خسارة متحرك لتأمين الأرباح 🛡️  
+- تقرير أداء مفصل 📊  
+
+💡 تحديث جديد  
+تم تحسين البوت بإضافة Stochastic وشروط أكثر دقة لنتائج متميزة!
+
+🌟 لا انصح بتتبع التوصيات لان الاستراتيجيات غير مضبوطة بشكل امن  🌟
+"""
+
 import time
 import os
 import pandas as pd
@@ -53,7 +77,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
-        # إضافة أعمدة جديدة: stage لتتبع المرحلة، target_multiplier و stop_loss_multiplier
+        # إنشاء جدول الإشارات مع الأعمدة المطلوبة
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -64,8 +88,8 @@ def init_db():
                 r2_score DOUBLE PRECISION,
                 volume_15m DOUBLE PRECISION,
                 stage INTEGER DEFAULT 1,
-                target_multiplier DOUBLE PRECISION,
-                stop_loss_multiplier DOUBLE PRECISION,
+                target_multiplier DOUBLE PRECISION DEFAULT 2,
+                stop_loss_multiplier DOUBLE PRECISION DEFAULT 1,
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
@@ -127,7 +151,12 @@ def run_ticker_socket_manager():
 def calculate_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
-def calculate_rsi_indicator(df, period=14):
+def calculate_ema_values(df):
+    df['ema5'] = calculate_ema(df['close'], span=5)
+    df['ema13'] = calculate_ema(df['close'], span=13)
+    return df
+
+def calculate_rsi_indicator(df, period=7):
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -135,8 +164,22 @@ def calculate_rsi_indicator(df, period=14):
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    logger.info(f"تم حساب RSI: {rsi.iloc[-1]:.2f}")
+    logger.info(f"تم حساب RSI (فترة {period}): {rsi.iloc[-1]:.2f}")
     return rsi
+
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    df['ema_fast'] = calculate_ema(df['close'], span=fast)
+    df['ema_slow'] = calculate_ema(df['close'], span=slow)
+    df['macd'] = df['ema_fast'] - df['ema_slow']
+    df['macd_signal'] = calculate_ema(df['macd'], span=signal)
+    return df
+
+def calculate_stochastic(df, period=14, smooth_k=3):
+    df['lowest_low'] = df['low'].rolling(window=period).min()
+    df['highest_high'] = df['high'].rolling(window=period).max()
+    df['stochastic_k'] = ((df['close'] - df['lowest_low']) / (df['highest_high'] - df['lowest_low'])) * 100
+    df['stochastic_d'] = df['stochastic_k'].rolling(window=smooth_k).mean()
+    return df
 
 def calculate_atr_indicator(df, period=14):
     high_low = df['high'] - df['low']
@@ -146,6 +189,42 @@ def calculate_atr_indicator(df, period=14):
     df['atr'] = df['tr'].rolling(window=period).mean()
     logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
+
+# ---------------------- دالة فحص شروط التداول الدقيقة ----------------------
+def check_trade_conditions(df, buy_price, target, stop_loss):
+    # حساب نسبة مخاطرة/عائد
+    risk = buy_price - stop_loss
+    reward = target - buy_price
+    rr_ratio = reward / risk if risk != 0 else 0
+    if rr_ratio < 2.5:
+        logger.info(f"نسبة مخاطرة/عائد {rr_ratio:.2f} أقل من المطلوب")
+        return False
+
+    # حساب مؤشرات EMA (5,13)
+    df = calculate_ema_values(df)
+    if df.iloc[-1]['ema5'] <= df.iloc[-1]['ema13']:
+        logger.info("EMA5 لم تتجاوز EMA13")
+        return False
+
+    # حساب RSI لفترة 7 - عدم وصوله لمستوى الشراء المفرط
+    rsi = calculate_rsi_indicator(df, period=7)
+    if rsi.iloc[-1] >= 70:
+        logger.info(f"RSI مرتفع ({rsi.iloc[-1]:.2f}) مما يشير لتشبع شرائي")
+        return False
+
+    # حساب MACD والتأكد من أن MACD فوق خط الإشارة
+    df = calculate_macd(df)
+    if df.iloc[-1]['macd'] <= df.iloc[-1]['macd_signal']:
+        logger.info("MACD لم يتجاوز خط الإشارة")
+        return False
+
+    # حساب Stochastic والتأكد من وجود تقاطع صعودي وعدم بلوغه مستويات تشبع شرائي
+    df = calculate_stochastic(df)
+    if df.iloc[-1]['stochastic_k'] <= df.iloc[-1]['stochastic_d'] or df.iloc[-1]['stochastic_k'] > 80:
+        logger.info("شروط Stochastic لم تتحقق")
+        return False
+
+    return True
 
 # ---------------------- دالة التحقق من نماذج الشموع ومستويات الدعم والمقاومة ----------------------
 def check_candlestick_pattern_and_support_resistance(df):
@@ -162,7 +241,7 @@ def check_candlestick_pattern_and_support_resistance(df):
     near_support = (last_candle['close'] - support) / support <= 0.02
     return bullish_engulfing and near_support
 
-# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot مع الهدف ووقف الخسارة الديناميكيين ----------------------
+# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Hummingbot ----------------------
 def generate_signal_using_hummingbot_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if df.empty:
@@ -176,6 +255,7 @@ def generate_signal_using_hummingbot_strategy(df, symbol):
     buy_price = current_price * (1 - spread)
     target = buy_price + target_multiplier * atr
     stop_loss = buy_price - stop_loss_multiplier * atr
+
     signal = {
         'symbol': symbol,
         'price': float(format(buy_price, '.8f')),
@@ -425,9 +505,8 @@ def track_signals():
                         continue
                     logger.info(f"فحص {symbol}: السعر الحالي {current_price}, الدخول {entry}, الهدف {target}, وقف الخسارة {stop_loss}, المرحلة {stage}")
                     
-                    # في حالة وصول السعر إلى الهدف، نقوم بتحديث وقف الخسارة والهدف (Trailing Stop)
+                    # عند وصول السعر للهدف، نقوم بتحديث وقف الخسارة والهدف (Trailing Stop)
                     if current_price >= target:
-                        # إعادة جلب البيانات التاريخية وحساب ATR الجديد
                         df = fetch_historical_data(symbol)
                         if df is None or len(df) < 50:
                             logger.warning(f"بيانات تاريخية غير كافية لتحديث {symbol}")
@@ -437,9 +516,9 @@ def track_signals():
                         
                         old_target = target
                         if stage == 1:
-                            new_stop_loss = entry  # المرحلة الأولى: يصبح سعر الدخول هو وقف الخسارة
+                            new_stop_loss = entry  # في المرحلة الأولى يصبح سعر الدخول هو وقف الخسارة
                         else:
-                            new_stop_loss = target  # في المراحل التالية: يصبح الهدف السابق هو وقف الخسارة
+                            new_stop_loss = target  # في المراحل التالية يصبح الهدف السابق هو وقف الخسارة
                         new_target = target + target_multiplier * atr
                         new_stage = stage + 1
                         
@@ -464,7 +543,7 @@ def track_signals():
                             logger.error(f"فشل تحديث {symbol}: {e}")
                             conn.rollback()
                     
-                    # إذا وصل السعر إلى وقف الخسارة، يتم تفعيل وقف الخسارة وإغلاق الإشارة
+                    # إذا وصل السعر إلى وقف الخسارة يتم تفعيل وقف الخسارة وإغلاق الإشارة
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
@@ -520,8 +599,9 @@ def analyze_market():
                 logger.warning(f"تجاهل {symbol} - بيانات تاريخية غير كافية")
                 continue
             volume_15m = fetch_recent_volume(symbol)
-            if volume_15m < 40000:
-                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
+            # تحديث شرط السيولة: يجب أن تتجاوز 100,000 USDT في 15 دقيقة
+            if volume_15m < 100000:
+                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f} USDT")
                 continue
 
             # التحقق من نماذج الشموع ومستويات الدعم/المقاومة
@@ -532,6 +612,21 @@ def analyze_market():
             # توليد الإشارة باستخدام استراتيجية Hummingbot
             signal = generate_signal_using_hummingbot_strategy(df, symbol)
             if not signal:
+                continue
+
+            # التحقق من شروط التداول الدقيقة:
+            buy_price = signal['price']
+            target = signal['target']
+            stop_loss = signal['stop_loss']
+            if (buy_price - stop_loss) <= 0:
+                logger.info(f"تجاهل {symbol} - معطيات وقف الخسارة غير منطقية")
+                continue
+            rr_ratio = (target - buy_price) / (buy_price - stop_loss)
+            if rr_ratio < 2.5:
+                logger.info(f"تجاهل {symbol} - نسبة مخاطرة/عائد {rr_ratio:.2f} أقل من المطلوب")
+                continue
+            if not check_trade_conditions(df, buy_price, target, stop_loss):
+                logger.info(f"تجاهل {symbol} - شروط المؤشرات لم تتحقق")
                 continue
 
             logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
