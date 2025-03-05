@@ -13,6 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
+import ta
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -138,15 +139,20 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
+def detect_candlestick_patterns(df):
+    patterns = {
+        'CDLHAMMER': ta.candlestick.cdl_hammer,
+        'CDLENGULFING': ta.candlestick.cdl_engulfing,
+        'CDLMORNINGSTAR': ta.candlestick.cdl_morning_star,
+        'CDLEVENINGSTAR': ta.candlestick.cdl_evening_star,
+        'CDLDOJI': ta.candlestick.cdl_doji,
+    }
+    for name, func in patterns.items():
+        df[name] = func(df['open'], df['high'], df['low'], df['close'])
+    return df
+
 # ---------------------- تعريف استراتيجية Freqtrade ----------------------
 class FreqtradeStrategy:
-    """
-    استراتيجية Freqtrade لتوليد إشارات التداول باستخدام المؤشرات:
-    - EMA8 و EMA21
-    - مؤشر RSI
-    - بولينجر باند (SMA20 و Upper Band)
-    - ATR لحساب الهدف ووقف الخسارة
-    """
     stoploss = -0.02
     minimal_roi = {"0": 0.01}
 
@@ -161,16 +167,15 @@ class FreqtradeStrategy:
         df['upper_band'] = df['sma20'] + (2 * df['std20'])
         df['lower_band'] = df['sma20'] - (2 * df['std20'])
         df = calculate_atr_indicator(df)
+        df = detect_candlestick_patterns(df)  # Add candlestick patterns
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        # شروط الدخول: EMA8 > EMA21، RSI بين 50 و70، والسعر الحالي أكبر من البولنجر العلوي
         conditions = (df['ema8'] > df['ema21']) & (df['rsi'] >= 50) & (df['rsi'] <= 70) & (df['close'] > df['upper_band'])
         df.loc[conditions, 'buy'] = 1
         return df
 
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        # شرط خروج مبسط: EMA8 أقل من EMA21 أو RSI أعلى من 70
         conditions = (df['ema8'] < df['ema21']) | (df['rsi'] > 70)
         df.loc[conditions, 'sell'] = 1
         return df
@@ -185,23 +190,14 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
     last_row = df.iloc[-1]
-    # التحقق من وجود إشارة شراء في آخر صف
     if last_row.get('buy', 0) == 1:
         current_price = last_row['close']
-        current_ema8 = last_row['ema8']
-        current_ema21 = last_row['ema21']
-        current_rsi = last_row['rsi']
-        current_upper_band = last_row['upper_band']
         current_atr = last_row['atr']
 
-        # حساب الهدف ووقف الخسارة بناءً على ATR
-        atr_multiplier = 1.5
+        # Calculate dynamic target and stop loss
+        atr_multiplier = 2.0
         target = current_price + atr_multiplier * current_atr
-        stop_loss = current_price * 0.98
-
-        profit_margin = (target / current_price - 1) * 100
-        if profit_margin < 1:
-            target = current_price * 1.01
+        stop_loss = current_price - atr_multiplier * current_atr
 
         signal = {
             'symbol': symbol,
@@ -210,10 +206,10 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
             'stop_loss': float(format(stop_loss, '.8f')),
             'strategy': 'freqtrade_day_trade',
             'indicators': {
-                'ema8': current_ema8,
-                'ema21': current_ema21,
-                'rsi': current_rsi,
-                'upper_band': current_upper_band,
+                'ema8': last_row['ema8'],
+                'ema21': last_row['ema21'],
+                'rsi': last_row['rsi'],
+                'upper_band': last_row['upper_band'],
                 'atr': current_atr,
             },
             'trade_value': TRADE_VALUE
@@ -325,8 +321,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
             f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
-            f"🛑 وقف الخسارة: ${signal['stop_loss']}\n"
-            f"📏 ATR: {signal['indicators'].get('atr', 'N/A')}\n"
+            f"🛑 وقف الخسارة: ${signal['stop_loss']} ({loss}%)\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -383,6 +378,9 @@ def send_telegram_alert_special(message):
 def send_report(target_chat_id):
     try:
         check_db_connection()
+        cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
+        active_count = cur.fetchone()[0]
+
         cur.execute("SELECT achieved_target, entry_price, target, stop_loss FROM signals WHERE closed_at IS NOT NULL")
         closed_signals = cur.fetchall()
         success_count = 0
@@ -405,6 +403,7 @@ def send_report(target_chat_id):
                 stop_loss_count += 1
                 loss_percentages.append(loss_pct)
                 total_loss += loss_dollar
+
         avg_profit_pct = sum(profit_percentages)/len(profit_percentages) if profit_percentages else 0
         avg_loss_pct = sum(loss_percentages)/len(loss_percentages) if loss_percentages else 0
         net_profit = total_profit + total_loss
@@ -413,6 +412,7 @@ def send_report(target_chat_id):
             f"📊 **تقرير الأداء الشامل**\n\n"
             f"✅ عدد التوصيات الناجحة: {success_count}\n"
             f"❌ عدد التوصيات التي حققت وقف الخسارة: {stop_loss_count}\n"
+            f"⏳ عدد التوصيات النشطة: {active_count}\n"
             f"💹 متوسط نسبة الربح للتوصيات الناجحة: {avg_profit_pct:.2f}%\n"
             f"📉 متوسط نسبة الخسارة للتوصيات مع وقف الخسارة: {avg_loss_pct:.2f}%\n"
             f"💵 إجمالي الربح/الخسارة: ${net_profit:.2f}"
@@ -455,6 +455,7 @@ def track_signals():
                     if abs(entry) < 1e-8:
                         logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
+                    
                     if current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -465,129 +466,45 @@ def track_signals():
                             f"⏱ {time.strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
-                        try:
-                            cur.execute("UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
-                            conn.commit()
-                            logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف")
-                        except Exception as e:
-                            logger.error(f"فشل تحديث الإشارة بعد تحقيق الهدف للزوج {symbol}: {e}")
-                            conn.rollback()
+                        cur.execute("UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
+                        conn.commit()
+                        logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف")
+                    
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
-                            f"🔴 **تفعيل وقف الخسارة - {symbol}**\n"
+                            f"❌ **ضرب وقف الخسارة - {symbol}**\n"
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر الخروج: ${current_price:.8f}\n"
                             f"• الخسارة: {loss:.2f}%\n"
                             f"⏱ {time.strftime('%H:%M:%S')}"
                         )
                         send_telegram_alert_special(msg)
-                        try:
-                            cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
-                            conn.commit()
-                            logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تفعيل وقف الخسارة")
-                        except Exception as e:
-                            logger.error(f"فشل تحديث الإشارة بعد تفعيل وقف الخسارة للزوج {symbol}: {e}")
-                            conn.rollback()
+                        cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
+                        conn.commit()
+                        logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد ضرب وقف الخسارة")
+                    
+                    # Update target or stop loss dynamically
+                    new_target = entry + 2 * current_atr
+                    new_stop_loss = entry - 2 * current_atr
+                    if new_target != target or new_stop_loss != stop_loss:
+                        msg = (
+                            f"🔄 **تحديث الهدف/وقف الخسارة - {symbol}**\n"
+                            f"• الهدف الجديد: ${new_target:.8f}\n"
+                            f"• وقف الخسارة الجديد: ${new_stop_loss:.8f}\n"
+                        )
+                        send_telegram_alert_special(msg)
+                        cur.execute("UPDATE signals SET target = %s, stop_loss = %s WHERE id = %s", (new_target, new_stop_loss, signal_id))
+                        conn.commit()
+                        logger.info(f"تم تحديث الهدف ووقف الخسارة للزوج {symbol}")
+
                 except Exception as e:
-                    logger.error(f"خطأ في تتبع الزوج {symbol}: {e}")
+                    logger.error(f"خطأ أثناء تتبع الإشارة {symbol}: {e}")
                     conn.rollback()
-                    continue
-            time.sleep(60)
+
         except Exception as e:
             logger.error(f"خطأ في خدمة تتبع الإشارات: {e}")
-            conn.rollback()
-            time.sleep(60)
-
-# ---------------------- فحص الأزواج بشكل دوري ----------------------
-def analyze_market():
-    logger.info("بدء فحص الأزواج الآن...")
-    check_db_connection()
-    
-    cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
-    active_signals_count = cur.fetchone()[0]
-    if active_signals_count >= 4:
-        logger.info("عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
-        return
-
-    btc_dominance, eth_dominance = get_market_dominance()
-    if btc_dominance is None or eth_dominance is None:
-        logger.warning("لم يتم جلب نسب السيطرة؛ سيتم تعيينها كـ 0.0")
-        btc_dominance, eth_dominance = 0.0, 0.0
-
-    symbols = get_crypto_symbols()
-    if not symbols:
-        logger.warning("لا توجد أزواج في الملف!")
-        return
-
-    for symbol in symbols:
-        logger.info(f"بدء فحص الزوج: {symbol}")
-        try:
-            # جلب بيانات لمدة يومين على فريم 1 دقيقة
-            df_1m = fetch_historical_data(symbol, interval='1m', days=2)
-            if df_1m is None or len(df_1m) < 50:
-                logger.warning(f"تجاهل {symbol} - بيانات 1m غير كافية")
-                continue
-            signal_1m = generate_signal_using_freqtrade_strategy(df_1m, symbol)
-            if not signal_1m:
-                logger.info(f"لم يتم الحصول على إشارة شراء على فريم 1m للزوج {symbol}")
-                continue
-
-            # جلب بيانات لمدة يومين على فريم 15 دقيقة
-            df_15m = fetch_historical_data(symbol, interval='15m', days=2)
-            if df_15m is None or len(df_15m) < 50:
-                logger.warning(f"تجاهل {symbol} - بيانات 15m غير كافية")
-                continue
-            signal_15m = generate_signal_using_freqtrade_strategy(df_15m, symbol)
-            if not signal_15m:
-                logger.info(f"لم يتم الحصول على إشارة شراء على فريم 15m للزوج {symbol}")
-                continue
-
-            # في حال الحصول على إشارة شراء في كلا الفريمين يتم إرسال التوصية
-            volume_15m = fetch_recent_volume(symbol)
-            if volume_15m < 40000:
-                logger.info(f"تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}")
-                continue
-
-            logger.info(f"الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}")
-            send_telegram_alert(signal_1m, volume_15m, btc_dominance, eth_dominance)
-            try:
-                cur.execute("""
-                    INSERT INTO signals 
-                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    signal_1m['symbol'],
-                    signal_1m['price'],
-                    signal_1m['target'],
-                    signal_1m['stop_loss'],
-                    signal_1m.get('confidence', 100),
-                    volume_15m
-                ))
-                conn.commit()
-                logger.info(f"تم إدخال الإشارة بنجاح للزوج {symbol}")
-            except Exception as e:
-                logger.error(f"فشل إدخال الإشارة للزوج {symbol}: {e}")
-                conn.rollback()
-            time.sleep(1)
-        except Exception as e:
-            logger.error(f"خطأ في معالجة الزوج {symbol}: {e}")
-            conn.rollback()
-            continue
-    logger.info("انتهى فحص جميع الأزواج")
-
-def test_telegram():
-    try:
-        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-        payload = {'chat_id': chat_id, 'text': 'رسالة اختبار من البوت', 'parse_mode': 'Markdown'}
-        response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"رد اختبار Telegram: {response.status_code} {response.text}")
-    except Exception as e:
-        logger.error(f"فشل إرسال رسالة الاختبار: {e}")
-
-def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+        time.sleep(60)
 
 # ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
@@ -598,11 +515,11 @@ if __name__ == '__main__':
     Thread(target=run_ticker_socket_manager, daemon=True).start()
     test_telegram()
     logger.info("✅ تم بدء التشغيل بنجاح!")
-    
+
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=5)
     scheduler.start()
-    
+
     try:
         while True:
             time.sleep(60)
