@@ -33,8 +33,8 @@ telegram_token = config('TELEGRAM_BOT_TOKEN')
 chat_id = config('TELEGRAM_CHAT_ID')
 db_url = config('DATABASE_URL')
 
-logger.info(f"TELEGRAM_BOT_TOKEN: {telegram_token[:10]}...")
-logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
+logger.info(f" TELEGRAM_BOT_TOKEN: {telegram_token[:10]}...")
+logger.info(f" TELEGRAM_CHAT_ID: {chat_id}")
 
 # قيمة الصفقة الثابتة للتوصيات
 TRADE_VALUE = 10
@@ -66,9 +66,9 @@ def init_db():
             )
         """)
         conn.commit()
-        logger.info("تم تهيئة قاعدة البيانات بنجاح")
+        logger.info("✅ تم تهيئة قاعدة البيانات بنجاح.")
     except Exception as e:
-        logger.error(f"فشل تهيئة قاعدة البيانات: {e}")
+        logger.error(f"❌ فشل تهيئة قاعدة البيانات: {e}")
         raise
 
 def check_db_connection():
@@ -77,13 +77,13 @@ def check_db_connection():
         cur.execute("SELECT 1")
         conn.commit()
     except Exception as e:
-        logger.warning("إعادة الاتصال بقاعدة البيانات...")
+        logger.warning("⚠️ إعادة الاتصال بقاعدة البيانات...")
         try:
             if conn:
                 conn.close()
             init_db()
         except Exception as ex:
-            logger.error(f"فشل إعادة الاتصال: {ex}")
+            logger.error(f"❌ فشل إعادة الاتصال: {ex}")
             raise
 
 # ---------------------- إعداد عميل Binance ----------------------
@@ -104,16 +104,16 @@ def handle_ticker_message(msg):
             if symbol:
                 ticker_data[symbol] = msg
     except Exception as e:
-        logger.error(f"خطأ في handle_ticker_message: {e}")
+        logger.error(f"❌ خطأ في handle_ticker_message: {e}")
 
 def run_ticker_socket_manager():
     try:
         twm = ThreadedWebsocketManager(api_key=api_key, api_secret=api_secret)
         twm.start()
         twm.start_miniticker_socket(callback=handle_ticker_message)
-        logger.info("تم تشغيل WebSocket لتحديث التيكر لجميع الأزواج")
+        logger.info("✅ تم تشغيل WebSocket لتحديث التيكر لجميع الأزواج.")
     except Exception as e:
-        logger.error(f"خطأ في تشغيل WebSocket: {e}")
+        logger.error(f"❌ خطأ في تشغيل WebSocket: {e}")
 
 # ---------------------- دوال حساب المؤشرات الفنية ----------------------
 def calculate_ema(series, span):
@@ -127,7 +127,7 @@ def calculate_rsi_indicator(df, period=14):
     avg_loss = loss.rolling(window=period, min_periods=period).mean()
     rs = avg_gain / avg_loss
     rsi = 100 - (100 / (1 + rs))
-    logger.info(f"تم حساب RSI: {rsi.iloc[-1]:.2f}")
+    logger.info(f"✅ تم حساب RSI: {rsi.iloc[-1]:.2f}")
     return rsi
 
 def calculate_atr_indicator(df, period=14):
@@ -136,7 +136,7 @@ def calculate_atr_indicator(df, period=14):
     low_close = (df['low'] - df['close'].shift(1)).abs()
     df['tr'] = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df['atr'] = df['tr'].rolling(window=period).mean()
-    logger.info(f"تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
+    logger.info(f"✅ تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
 # ---------------------- كشف الأنماط الشمعية ----------------------
@@ -150,6 +150,7 @@ def detect_candlestick_patterns(df):
     }
     for name, func in patterns.items():
         df[name] = func(df['open'], df['high'], df['low'], df['close'])
+    logger.info("✅ تم تحليل الأنماط الشمعية.")
     return df
 
 # ---------------------- تعريف استراتيجية Freqtrade ----------------------
@@ -168,16 +169,19 @@ class FreqtradeStrategy:
         df['upper_band'] = df['sma20'] + (2 * df['std20'])
         df['lower_band'] = df['sma20'] - (2 * df['std20'])
         df = calculate_atr_indicator(df)
+        logger.info("✅ تم حساب المؤشرات الفنية.")
         return df
 
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (df['ema8'] > df['ema21']) & (df['rsi'] >= 50) & (df['rsi'] <= 70) & (df['close'] > df['upper_band'])
         df.loc[conditions, 'buy'] = 1
+        logger.info("✅ تم تحديد شروط الشراء.")
         return df
 
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (df['ema8'] < df['ema21']) | (df['rsi'] > 70)
         df.loc[conditions, 'sell'] = 1
+        logger.info("✅ تم تحديد شروط البيع.")
         return df
 
 # ---------------------- دالة توليد الإشارة باستخدام استراتيجية Freqtrade ----------------------
@@ -195,7 +199,7 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         current_atr = last_row['atr']
 
         # Calculate dynamic target and stop loss
-        atr_multiplier = 2.0
+        atr_multiplier = 1.5
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
 
@@ -214,10 +218,10 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
             },
             'trade_value': TRADE_VALUE
         }
-        logger.info(f"تم توليد إشارة من استراتيجية Freqtrade للزوج {symbol}: {signal}")
+        logger.info(f"✅ تم توليد إشارة من استراتيجية Freqtrade للزوج {symbol}: {signal}")
         return signal
     else:
-        logger.info(f"[{symbol}] الشروط غير مستوفاة في استراتيجية Freqtrade")
+        logger.info(f"[{symbol}] الشروط غير مستوفاة في استراتيجية Freqtrade.")
         return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -225,7 +229,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "نظام توصيات التداول يعمل بكفاءة 🚀", 200
+    return "🚀 نظام توصيات التداول يعمل بكفاءة.", 200
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -247,26 +251,26 @@ def set_telegram_webhook():
         response = requests.get(url, timeout=10)
         res_json = response.json()
         if res_json.get("ok"):
-            logger.info(f"تم تسجيل webhook بنجاح: {res_json}")
+            logger.info(f"✅ تم تسجيل webhook بنجاح: {res_json}")
         else:
-            logger.error(f"فشل تسجيل webhook: {res_json}")
+            logger.error(f"❌ فشل تسجيل webhook: {res_json}")
     except Exception as e:
-        logger.error(f"استثناء أثناء تسجيل webhook: {e}")
+        logger.error(f"❌ استثناء أثناء تسجيل webhook: {e}")
 
 # ---------------------- وظائف تحليل البيانات ----------------------
 def get_crypto_symbols():
     try:
         with open('crypto_list.txt', 'r') as f:
             symbols = [f"{line.strip().upper()}USDT" for line in f if line.strip()]
-            logger.info(f"تم الحصول على {len(symbols)} زوج من العملات")
+            logger.info(f"✅ تم الحصول على {len(symbols)} زوج من العملات.")
             return symbols
     except Exception as e:
-        logger.error(f"خطأ في قراءة الملف: {e}")
+        logger.error(f"❌ خطأ في قراءة الملف: {e}")
         return []
 
 def fetch_historical_data(symbol, interval='5m', days=3):
     try:
-        logger.info(f"بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام")
+        logger.info(f"⏳ بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام.")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
         df = pd.DataFrame(klines, columns=[
             'timestamp', 'open', 'high', 'low', 'close', 'volume',
@@ -277,20 +281,20 @@ def fetch_historical_data(symbol, interval='5m', days=3):
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
-        logger.info(f"تم جلب {len(df)} صف من البيانات للزوج: {symbol}")
+        logger.info(f"✅ تم جلب {len(df)} صف من البيانات للزوج: {symbol}.")
         return df[['timestamp', 'open', 'high', 'low', 'close']]
     except Exception as e:
-        logger.error(f"خطأ في جلب البيانات لـ {symbol}: {e}")
+        logger.error(f"❌ خطأ في جلب البيانات لـ {symbol}: {e}")
         return None
 
 def fetch_recent_volume(symbol):
     try:
         klines = client.get_historical_klines(symbol, Client.KLINE_INTERVAL_1MINUTE, "15 minutes ago UTC")
         volume = sum(float(k[5]) for k in klines)
-        logger.info(f"حجم السيولة للزوج {symbol} في آخر 15 دقيقة: {volume:,.2f} USDT")
+        logger.info(f"✅ حجم السيولة للزوج {symbol} في آخر 15 دقيقة: {volume:,.2f} USDT.")
         return volume
     except Exception as e:
-        logger.error(f"خطأ في جلب حجم {symbol}: {e}")
+        logger.error(f"❌ خطأ في جلب حجم {symbol}: {e}")
         return 0
 
 def get_market_dominance():
@@ -302,13 +306,13 @@ def get_market_dominance():
             market_cap_percentage = data.get("market_cap_percentage", {})
             btc_dominance = market_cap_percentage.get("btc")
             eth_dominance = market_cap_percentage.get("eth")
-            logger.info(f"BTC Dominance: {btc_dominance}%, ETH Dominance: {eth_dominance}%")
+            logger.info(f"✅ BTC Dominance: {btc_dominance}%, ETH Dominance: {eth_dominance}%")
             return btc_dominance, eth_dominance
         else:
-            logger.error(f"خطأ في جلب نسب السيطرة: {response.status_code} {response.text}")
+            logger.error(f"❌ خطأ في جلب نسب السيطرة: {response.status_code} {response.text}")
             return None, None
     except Exception as e:
-        logger.error(f"خطأ في get_market_dominance: {e}")
+        logger.error(f"❌ خطأ في get_market_dominance: {e}")
         return None, None
 
 # ---------------------- إرسال التنبيهات عبر Telegram ----------------------
@@ -342,13 +346,13 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             'reply_markup': json.dumps(reply_markup)
         }
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"رد Telegram: {response.status_code} {response.text}")
+        logger.info(f"✅ رد Telegram: {response.status_code} {response.text}")
         if response.status_code != 200:
-            logger.error(f"فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {response.status_code} {response.text}")
+            logger.error(f"❌ فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {response.status_code} {response.text}")
         else:
-            logger.info(f"تم إرسال إشعار التوصية للزوج {signal['symbol']} بنجاح")
+            logger.info(f"✅ تم إرسال إشعار التوصية للزوج {signal['symbol']} بنجاح.")
     except Exception as e:
-        logger.error(f"فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {e}")
+        logger.error(f"❌ فشل إرسال إشعار التوصية للزوج {signal['symbol']}: {e}")
 
 def send_telegram_alert_special(message):
     try:
@@ -367,13 +371,13 @@ def send_telegram_alert_special(message):
             'reply_markup': json.dumps(reply_markup)
         }
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"رد Telegram: {response.status_code} {response.text}")
+        logger.info(f"✅ رد Telegram: {response.status_code} {response.text}")
         if response.status_code != 200:
-            logger.error(f"فشل إرسال التنبيه: {response.status_code} {response.text}")
+            logger.error(f"❌ فشل إرسال التنبيه: {response.status_code} {response.text}")
         else:
-            logger.info("تم إرسال التنبيه الخاص بنجاح")
+            logger.info("✅ تم إرسال التنبيه الخاص بنجاح.")
     except Exception as e:
-        logger.error(f"فشل إرسال التنبيه: {e}")
+        logger.error(f"❌ فشل إرسال التنبيه: {e}")
 
 def send_report(target_chat_id):
     try:
@@ -424,13 +428,13 @@ def send_report(target_chat_id):
             'parse_mode': 'Markdown'
         }
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"تم إرسال تقرير الأداء: {response.status_code} {response.text}")
+        logger.info(f"✅ تم إرسال تقرير الأداء: {response.status_code} {response.text}")
     except Exception as e:
-        logger.error(f"فشل إرسال تقرير الأداء: {e}")
+        logger.error(f"❌ فشل إرسال تقرير الأداء: {e}")
 
 # ---------------------- خدمة تتبع الإشارات ----------------------
 def track_signals():
-    logger.info("بدء خدمة تتبع الإشارات...")
+    logger.info("⏳ بدء خدمة تتبع الإشارات...")
     while True:
         try:
             check_db_connection()
@@ -442,24 +446,24 @@ def track_signals():
                   AND closed_at IS NULL
             """)
             active_signals = cur.fetchall()
-            logger.info(f"تم العثور على {len(active_signals)} إشارة نشطة للتتبع")
+            logger.info(f"✅ تم العثور على {len(active_signals)} إشارة نشطة للتتبع.")
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss = signal
                 try:
                     if symbol in ticker_data:
                         current_price = float(ticker_data[symbol].get('c', 0))
                     else:
-                        logger.warning(f"لا يوجد تحديث أسعار لحظة {symbol} من WebSocket")
+                        logger.warning(f"⚠️ لا يوجد تحديث أسعار لحظة {symbol} من WebSocket.")
                         continue
-                    logger.info(f"فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
+                    logger.info(f"⏳ فحص الزوج {symbol}: السعر الحالي {current_price}, سعر الدخول {entry}")
                     if abs(entry) < 1e-8:
-                        logger.error(f"سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
+                        logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
                     # Fetch recent candlestick data for pattern analysis
                     df = fetch_historical_data(symbol, interval='5m', days=1)
                     if df is None or len(df) < 50:
-                        logger.warning(f"بيانات الشموع غير كافية للزوج {symbol}")
+                        logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
                     
                     # Detect candlestick patterns
@@ -493,7 +497,7 @@ def track_signals():
                                 (new_target, new_stop_loss, signal_id)
                             )
                             conn.commit()
-                            logger.info(f"تم تحديث الهدف ووقف الخسارة للزوج {symbol}")
+                            logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
 
                     # Handle sell signal
                     elif is_bearish:
@@ -512,7 +516,7 @@ def track_signals():
                             (signal_id,)
                         )
                         conn.commit()
-                        logger.info(f"تم إغلاق التوصية للزوج {symbol} بسبب إشارة بيع")
+                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بسبب إشارة بيع.")
 
                     # Check if target or stop loss is hit
                     elif current_price >= target:
@@ -529,7 +533,7 @@ def track_signals():
                             (signal_id,)
                         )
                         conn.commit()
-                        logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف")
+                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف.")
 
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
@@ -545,25 +549,108 @@ def track_signals():
                             (signal_id,)
                         )
                         conn.commit()
-                        logger.info(f"تم إغلاق التوصية للزوج {symbol} بعد ضرب وقف الخسارة")
+                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد ضرب وقف الخسارة.")
 
                 except Exception as e:
-                    logger.error(f"خطأ أثناء تتبع الإشارة {symbol}: {e}")
+                    logger.error(f"❌ خطأ أثناء تتبع الإشارة {symbol}: {e}")
                     conn.rollback()
 
         except Exception as e:
-            logger.error(f"خطأ في خدمة تتبع الإشارات: {e}")
+            logger.error(f"❌ خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
+
+# ---------------------- تحليل السوق ----------------------
+def analyze_market():
+    try:
+        check_db_connection()
+        cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
+        active_count = cur.fetchone()[0]
+        if active_count >= 4:
+            logger.info("⚠️ عدد التوصيات النشطة وصل إلى الحد الأقصى (4). لن يتم إرسال توصيات جديدة حتى إغلاق توصية حالية.")
+            return
+
+        btc_dominance, eth_dominance = get_market_dominance()
+        if btc_dominance is None or eth_dominance is None:
+            logger.warning("⚠️ لم يتم جلب نسب السيطرة؛ سيتم تعيينها كـ 0.0")
+            btc_dominance, eth_dominance = 0.0, 0.0
+
+        symbols = get_crypto_symbols()
+        if not symbols:
+            logger.warning("⚠️ لا توجد أزواج في الملف!")
+            return
+
+        for symbol in symbols:
+            logger.info(f"⏳ بدء فحص الزوج: {symbol}")
+            try:
+                # Fetch 1-minute data for the last 2 days
+                df_1m = fetch_historical_data(symbol, interval='1m', days=2)
+                if df_1m is None or len(df_1m) < 50:
+                    logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1m غير كافية.")
+                    continue
+                signal_1m = generate_signal_using_freqtrade_strategy(df_1m, symbol)
+                if not signal_1m:
+                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 1m للزوج {symbol}.")
+                    continue
+
+                # Fetch 15-minute data for the last 2 days
+                df_15m = fetch_historical_data(symbol, interval='15m', days=2)
+                if df_15m is None or len(df_15m) < 50:
+                    logger.warning(f"⚠️ تجاهل {symbol} - بيانات 15m غير كافية.")
+                    continue
+                signal_15m = generate_signal_using_freqtrade_strategy(df_15m, symbol)
+                if not signal_15m:
+                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 15m للزوج {symbol}.")
+                    continue
+
+                # If buy signals are generated on both timeframes, send the alert
+                volume_15m = fetch_recent_volume(symbol)
+                if volume_15m < 40000:
+                    logger.info(f"⚠️ تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}.")
+                    continue
+
+                logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}.")
+                send_telegram_alert(signal_1m, volume_15m, btc_dominance, eth_dominance)
+
+                try:
+                    cur.execute("""
+                        INSERT INTO signals 
+                        (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    """, (
+                        signal_1m['symbol'],
+                        signal_1m['price'],
+                        signal_1m['target'],
+                        signal_1m['stop_loss'],
+                        signal_1m.get('confidence', 100),
+                        volume_15m
+                    ))
+                    conn.commit()
+                    logger.info(f"✅ تم إدخال الإشارة بنجاح للزوج {symbol}.")
+                except Exception as e:
+                    logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
+                    conn.rollback()
+
+                time.sleep(1)  # Add a delay to avoid API rate limits
+
+            except Exception as e:
+                logger.error(f"❌ خطأ في معالجة الزوج {symbol}: {e}")
+                conn.rollback()
+                continue
+
+        logger.info("✅ انتهى فحص جميع الأزواج.")
+
+    except Exception as e:
+        logger.error(f"❌ خطأ في تحليل السوق: {e}")
 
 # ---------------------- اختبار Telegram ----------------------
 def test_telegram():
     try:
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-        payload = {'chat_id': chat_id, 'text': 'رسالة اختبار من البوت', 'parse_mode': 'Markdown'}
+        payload = {'chat_id': chat_id, 'text': '🚀 رسالة اختبار من البوت.', 'parse_mode': 'Markdown'}
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"رد اختبار Telegram: {response.status_code} {response.text}")
+        logger.info(f"✅ رد اختبار Telegram: {response.status_code} {response.text}")
     except Exception as e:
-        logger.error(f"فشل إرسال رسالة الاختبار: {e}")
+        logger.error(f"❌ فشل إرسال رسالة الاختبار: {e}")
 
 # ---------------------- تشغيل Flask ----------------------
 def run_flask():
