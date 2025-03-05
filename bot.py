@@ -35,7 +35,7 @@ db_url = config('DATABASE_URL')
 logger.info(f"TELEGRAM_BOT_TOKEN: {telegram_token[:10]}...")
 logger.info(f"TELEGRAM_CHAT_ID: {chat_id}")
 
-TRADE_VALUE = 10
+TRADE_VALUE = 10  # قيمة الصفقة الثابتة
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -202,6 +202,26 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         return signal
     return None
 
+# ---------------------- وظائف Telegram ----------------------
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
+    logger.info("Received update: " + str(update))
+    
+    if "callback_query" in update:
+        callback_data = update["callback_query"]["data"]
+        chat_id_callback = update["callback_query"]["message"]["chat"]["id"]
+        
+        if callback_data == "get_report":
+            # إرسال التقرير إلى المستخدم
+            send_report(chat_id_callback)
+            
+            # تحديث حالة الزر في Telegram
+            answer_url = f"https://api.telegram.org/bot{telegram_token}/answerCallbackQuery"
+            requests.post(answer_url, json={"callback_query_id": update["callback_query"]["id"], "text": "جاري إرسال التقرير..."})
+    
+    return '', 200
+
 # ---------------------- وظائف التحليل ----------------------
 def get_crypto_symbols():
     try:
@@ -237,12 +257,12 @@ def fetch_volume(symbol):
 # ---------------------- إرسال التنبيهات ----------------------
 def send_telegram_alert(signal, volume):
     try:
-        profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
+        profit_margin = ((signal['target'] / signal['price']) - 1) * 100
         message = f"""
-🚨 **إشارـة تجديـد**  
+🚨 **إشارـة تجديد**  
 ✨ **الزوج**: {signal['symbol']}  
 💰 **السعر الحالي**: ${signal['price']:.8f}  
-🎯 **الهدف**: ${signal['target']:.8f} (+{profit}%)  
+🎯 **الهدف**: ${signal['target']:.8f} (+{profit_margin:.2f}%)  
 ⚠️ **وقف الخسارة**: ${signal['stop_loss']:.8f}  
 📊 **المؤشرات**:  
    • EMA8: {signal['indicators']['ema8']}  
@@ -252,7 +272,7 @@ def send_telegram_alert(signal, volume):
 💸 **القيمة الموصى بها**: ${TRADE_VALUE}  
 ⏱ **الوقت**: {time.strftime('%Y-%m-%d %H:%M')}
         """.strip()
-        
+
         url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
         payload = {
             'chat_id': chat_id,
@@ -260,7 +280,7 @@ def send_telegram_alert(signal, volume):
             'parse_mode': 'Markdown'
         }
         response = requests.post(url, json=payload, timeout=10)
-        logger.info(f"Telegram Response: {response.status_code}")
+        logger.info(f"Telegram Response: {response.status_code} {response.text}")
     except Exception as e:
         logger.error(f"❌ فشل إرسال الإشعار: {e}")
 
@@ -282,27 +302,29 @@ def analyze_market():
                 continue
 
             signal_5m = generate_signal_using_freqtrade_strategy(df_5m, symbol)
+            if not signal_5m:
+                logger.info(f"⚠️ الشروط غير مستوفاة لـ {symbol}")
+                continue
 
-            if signal_5m:
-                volume = fetch_volume(symbol)
-                if volume < 40000:
-                    logger.warning(f"⚠️ حجم {symbol} منخفض ({volume:,.2f} USDT)")
-                    continue
+            volume = fetch_volume(symbol)
+            if volume < 40000:
+                logger.warning(f"⚠️ حجم {symbol} منخفض ({volume:,.2f} USDT)")
+                continue
 
-                send_telegram_alert(signal_5m, volume)
+            send_telegram_alert(signal_5m, volume)
 
-                cur.execute("""
-                    INSERT INTO signals (symbol, entry_price, target, stop_loss, volume_15m)
-                    VALUES (%s, %s, %s, %s, %s)
-                """, (
-                    signal_5m['symbol'],
-                    signal_5m['price'],
-                    signal_5m['target'],
-                    signal_5m['stop_loss'],
-                    volume
-                ))
-                conn.commit()
-                logger.info(f"✅ تم إدخال الإشارة لـ {symbol}")
+            cur.execute("""
+                INSERT INTO signals (symbol, entry_price, target, stop_loss, volume_15m)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                signal_5m['symbol'],
+                signal_5m['price'],
+                signal_5m['target'],
+                signal_5m['stop_loss'],
+                volume
+            ))
+            conn.commit()
+            logger.info(f"✅ تم إدخال الإشارة لـ {symbol}")
 
     except Exception as e:
         logger.error(f"❌ خطأ في تحليل السوق: {e}")
@@ -328,19 +350,19 @@ def track_signals():
                 if new_stop > stop_loss:
                     cur.execute("UPDATE signals SET stop_loss = %s WHERE id = %s", (new_stop, signal_id))
                     conn.commit()
-                    send_telegram_alert(f"🔄 تم تحديث وقف الخسارة لـ {symbol} إلى ${new_stop:.8f}")
+                    send_telegram_alert_special(f"🔄 تم تحديث وقف الخسارة لـ {symbol} إلى ${new_stop:.8f}")
 
                 # إغلاق الإشارة عند تحقيق الهدف
                 if current_price >= target:
                     profit = ((current_price / entry) - 1) * 100
-                    send_telegram_alert(f"🎉 تم تحقيق الهدف لـ {symbol}! ربح {profit:.2f}%")
+                    send_telegram_alert_special(f"🎉 تم تحقيق الهدف لـ {symbol}! ربح {profit:.2f}%")
                     cur.execute("UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
                     conn.commit()
 
                 # إغلاق الإشارة عند ضرب وقف الخسارة
                 elif current_price <= stop_loss:
                     loss = ((current_price / entry) - 1) * 100
-                    send_telegram_alert(f"❌ تم ضرب وقف الخسارة لـ {symbol}! خسارة {-loss:.2f}%")
+                    send_telegram_alert_special(f"❌ تم ضرب وقف الخسارة لـ {symbol}! خسارة {-loss:.2f}%")
                     cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
                     conn.commit()
 
@@ -348,18 +370,112 @@ def track_signals():
             logger.error(f"❌ خطأ في تتبع الإشارات: {e}")
         time.sleep(60)
 
-# ---------------------- واجهة الويب ----------------------
+def send_telegram_alert_special(message):
+    try:
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            'chat_id': chat_id,
+            'text': message,
+            'parse_mode': 'Markdown'
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        logger.info(f"Telegram Response: {response.status_code} {response.text}")
+    except Exception as e:
+        logger.error(f"❌ فشل إرسال التنبيه الخاص: {e}")
+
+# ---------------------- إرسال تقرير الأداء ----------------------
+def send_report(target_chat_id):
+    try:
+        check_db_connection()
+        cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
+        active_count = cur.fetchone()[0]
+
+        cur.execute("SELECT achieved_target, entry_price, target, stop_loss FROM signals WHERE closed_at IS NOT NULL")
+        closed_signals = cur.fetchall()
+
+        success_count = 0
+        stop_loss_count = 0
+        profit_percentages = []
+        loss_percentages = []
+        total_profit = 0.0
+        total_loss = 0.0
+
+        for row in closed_signals:
+            achieved_target, entry, target_val, stop_loss_val = row
+            if achieved_target:
+                profit_pct = (target_val / entry - 1) * 100
+                profit_dollar = TRADE_VALUE * (target_val / entry - 1)
+                success_count += 1
+                profit_percentages.append(profit_pct)
+                total_profit += profit_dollar
+            else:
+                loss_pct = (stop_loss_val / entry - 1) * 100
+                loss_dollar = TRADE_VALUE * (stop_loss_val / entry - 1)
+                stop_loss_count += 1
+                loss_percentages.append(loss_pct)
+                total_loss += loss_dollar
+
+        avg_profit_pct = sum(profit_percentages) / len(profit_percentages) if profit_percentages else 0
+        avg_loss_pct = sum(loss_percentages) / len(loss_percentages) if loss_percentages else 0
+        net_profit = total_profit + total_loss
+
+        report_message = (
+            f"📊 **تقرير الأداء الشامل**\n\n"
+            f"✅ عدد التوصيات الناجحة: {success_count}\n"
+            f"❌ عدد التوصيات التي حققت وقف الخسارة: {stop_loss_count}\n"
+            f"⏳ عدد التوصيات النشطة: {active_count}\n"
+            f"📈 متوسط نسبة الربح للتوصيات الناجحة: {avg_profit_pct:.2f}%\n"
+            f"📉 متوسط نسبة الخسارة للتوصيات مع وقف الخسارة: {avg_loss_pct:.2f}%\n"
+            f"💰 إجمالي الربح/الخسارة: ${net_profit:.2f}"
+        )
+
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {
+            'chat_id': target_chat_id,
+            'text': report_message,
+            'parse_mode': 'Markdown'
+        }
+        response = requests.post(url, json=payload, timeout=10)
+        logger.info(f"Telegram Response: {response.status_code} {response.text}")
+    except Exception as e:
+        logger.error(f"❌ فشل إرسال تقرير الأداء: {e}")
+
+# ---------------------- اختبار Telegram ----------------------
+def test_telegram():
+    try:
+        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
+        payload = {'chat_id': chat_id, 'text': '🚀 رسالة اختبار من البوت.', 'parse_mode': 'Markdown'}
+        response = requests.post(url, json=payload, timeout=10)
+        logger.info(f"✅ رد اختبار Telegram: {response.status_code} {response.text}")
+    except Exception as e:
+        logger.error(f"❌ فشل إرسال رسالة الاختبار: {e}")
+
+# ---------------------- تشغيل Flask ----------------------
 app = Flask(__name__)
 
 @app.route('/')
 def status():
     return "统运行中🚀", 200
 
+# ---------------------- الويب هوك ----------------------
+def set_telegram_webhook():
+    webhook_url = "https://hamza-1.onrender.com/webhook"
+    url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
+    try:
+        response = requests.get(url, timeout=10)
+        res_json = response.json()
+        if res_json.get("ok"):
+            logger.info(f"✅ تم تسجيل webhook بنجاح: {res_json}")
+        else:
+            logger.error(f"❌ فشل تسجيل webhook: {res_json}")
+    except Exception as e:
+        logger.error(f"❌ استثناء أثناء تسجيل webhook: {e}")
+
 # ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
     init_db()
-    
-    # إعداد الخيوط
+    set_telegram_webhook()
+
     threads = [
         Thread(target=run_ticker_socket_manager, daemon=True),
         Thread(target=track_signals, daemon=True),
@@ -367,10 +483,8 @@ if __name__ == '__main__':
     for thread in threads:
         thread.start()
 
-    # جدولة التحليل كل 5 دقائق
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=5)
     scheduler.start()
 
-    # تشغيل الويب
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
