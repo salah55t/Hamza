@@ -13,7 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-import ta  # تُستخدم لحساب المؤشرات الفنية (EMA, RSI, ATR)
+import ta  # تُستخدم لحساب المؤشرات الفنية مثل EMA, RSI, ATR
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -139,6 +139,18 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"✅ تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
+# ---------------------- حساب مستويات الدعم والمقاومة (Pivot Points) ----------------------
+def calculate_pivot_points(df):
+    # نستخدم آخر 14 شمعة لحساب أعلى وأدنى مستوى
+    last_high = df['high'].rolling(window=14).max().iloc[-1]
+    last_low = df['low'].rolling(window=14).min().iloc[-1]
+    last_close = df['close'].iloc[-1]
+    pivot = (last_high + last_low + last_close) / 3
+    resistance = 2 * pivot - last_low
+    support = 2 * pivot - last_high
+    logger.info(f"✅ نقاط المحور - المحور: {pivot:.4f}, المقاومة: {resistance:.4f}, الدعم: {support:.4f}")
+    return pivot, resistance, support
+
 # ---------------------- دوال الكشف عن الأنماط الشمعية بدون TA-Lib ----------------------
 def is_hammer(row):
     open_price = row['open']
@@ -151,6 +163,7 @@ def is_hammer(row):
         return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
+    # شرط المطرقة: ظل سفلي طويل (على الأقل ضعف الجسم) وظل علوي ضعيف
     if body > 0 and lower_shadow >= 2 * body and upper_shadow <= 0.1 * body:
         return 100
     return 0
@@ -160,18 +173,32 @@ def compute_engulfing(df, idx):
         return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
+    # الابتلاع الصعودي
     if prev['close'] < prev['open'] and curr['close'] > curr['open']:
         if curr['open'] < prev['close'] and curr['close'] > prev['open']:
             return 100
+    # الابتلاع الهبوطي
     if prev['close'] > prev['open'] and curr['close'] < curr['open']:
         if curr['open'] > prev['close'] and curr['close'] < prev['open']:
             return -100
     return 0
 
+def is_doji(row, threshold=0.1):
+    body = abs(row['close'] - row['open'])
+    range_ = row['high'] - row['low']
+    if range_ == 0:
+        return 0
+    if body / range_ < threshold:
+        return 100
+    return 0
+
 def detect_candlestick_patterns(df):
     df['Hammer'] = df.apply(is_hammer, axis=1)
     df['Engulfing'] = [compute_engulfing(df, i) for i in range(len(df))]
-    df['Bullish'] = df.apply(lambda row: 100 if row['Hammer'] == 100 or row['Engulfing'] == 100 else 0, axis=1)
+    df['Doji'] = df.apply(is_doji, axis=1)
+    # نجمع الإشارات الصعودية: إذا كان هناك نموذج المطرقة أو الابتلاع الصعودي أو Doji
+    df['Bullish'] = df.apply(lambda row: 100 if (row['Hammer'] == 100 or row['Engulfing'] == 100 or row['Doji'] == 100) else 0, axis=1)
+    # نموذج الابتلاع الهبوطي يُعتبر إشارة على انعكاس الاتجاه
     df['Bearish'] = df.apply(lambda row: 100 if row['Engulfing'] == -100 else 0, axis=1)
     logger.info("✅ تم تحليل الأنماط الشمعية باستخدام الدوال المخصصة.")
     return df
@@ -198,23 +225,28 @@ class FreqtradeStrategy:
     def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (df['ema8'] > df['ema21']) & (df['rsi'] >= 50) & (df['rsi'] <= 70) & (df['close'] > df['upper_band'])
         df.loc[conditions, 'buy'] = 1
-        logger.info("✅ تم تحديد شروط الشراء.")
+        logger.info("✅ تم تحديد شروط الشراء الأساسية.")
         return df
 
     def populate_sell_trend(self, df: pd.DataFrame) -> pd.DataFrame:
         conditions = (df['ema8'] < df['ema21']) | (df['rsi'] > 70)
         df.loc[conditions, 'sell'] = 1
-        logger.info("✅ تم تحديد شروط البيع.")
+        logger.info("✅ تم تحديد شروط البيع الأساسية.")
         return df
 
-# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Freqtrade ----------------------
+# ---------------------- دالة توليد الإشارة باستخدام استراتيجية Freqtrade مع دعم مستويات الدعم والمقاومة ----------------------
 def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
+
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
+    
+    # حساب نقاط المحور (الدعم والمقاومة)
+    pivot, resistance, support = calculate_pivot_points(df)
+    
     last_row = df.iloc[-1]
     if last_row.get('buy', 0) == 1:
         current_price = last_row['close']
@@ -222,25 +254,34 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         atr_multiplier = 1.5
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
-        signal = {
-            'symbol': symbol,
-            'price': float(format(current_price, '.8f')),
-            'target': float(format(target, '.8f')),
-            'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'freqtrade_day_trade',
-            'indicators': {
-                'ema8': last_row['ema8'],
-                'ema21': last_row['ema21'],
-                'rsi': last_row['rsi'],
-                'upper_band': last_row['upper_band'],
-                'atr': current_atr,
-            },
-            'trade_value': TRADE_VALUE
-        }
-        logger.info(f"✅ تم توليد إشارة من استراتيجية Freqtrade للزوج {symbol}: {signal}")
-        return signal
+        
+        # إضافة شرط دعم إضافي: إذا كان السعر قريباً من مستوى الدعم مع وجود نموذج شمعة صعودية
+        if current_price <= support * 1.02 and last_row.get('Bullish', 0) == 100:
+            signal = {
+                'symbol': symbol,
+                'price': float(format(current_price, '.8f')),
+                'target': float(format(target, '.8f')),
+                'stop_loss': float(format(stop_loss, '.8f')),
+                'strategy': 'freqtrade_day_trade',
+                'indicators': {
+                    'ema8': last_row['ema8'],
+                    'ema21': last_row['ema21'],
+                    'rsi': last_row['rsi'],
+                    'upper_band': last_row['upper_band'],
+                    'atr': current_atr,
+                    'pivot': pivot,
+                    'support': support,
+                    'resistance': resistance
+                },
+                'trade_value': TRADE_VALUE
+            }
+            logger.info(f"✅ تم توليد إشارة للزوج {symbol} بناءً على الدعم ومستوى الشموع: {signal}")
+            return signal
+        else:
+            logger.info(f"[{symbol}] الشروط الإضافية (الدعم/الشموع) غير مستوفاة.")
+            return None
     else:
-        logger.info(f"[{symbol}] الشروط غير مستوفاة في استراتيجية Freqtrade.")
+        logger.info(f"[{symbol}] الشروط الأساسية غير مستوفاة.")
         return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -452,7 +493,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات ----------------------
+# ---------------------- خدمة تتبع الإشارات (متابعة وتحديث التوصيات المفتوحة) ----------------------
 def track_signals():
     logger.info("⏳ بدء خدمة تتبع الإشارات...")
     while True:
@@ -480,21 +521,21 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # جلب بيانات الشموع (فريم 5m فقط)
+                    # جلب بيانات الشموع لفريم 5m
                     df = fetch_historical_data(symbol, interval='5m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
-                    
+
                     # تحليل الأنماط باستخدام الدوال المخصصة
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
-                    # استخدام الأعمدة Bullish و Bearish لتحديد الاتجاه
+                    # استخدام الأعمدة Bullish وBearish لتحديد الاتجاه
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # تحديث الهدف ووقف الخسارة (Trailing) عند استمرار الصعود
+                    # نظام Trailing: إذا كان السعر أعلى من سعر الدخول ومع وجود إشارة صعودية، يتم رفع الهدف ووقف الخسارة
                     if current_price > entry and is_bullish:
                         atr_multiplier = 1.5
                         new_stop_loss = current_price - atr_multiplier * last_row['atr']
@@ -519,7 +560,7 @@ def track_signals():
                             )
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
-
+                    # إذا ظهرت إشارة هبوط (Bearish) فقم بإغلاق التوصية
                     elif is_bearish:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -534,8 +575,8 @@ def track_signals():
                             (signal_id,)
                         )
                         conn.commit()
-                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بسبب إشارة بيع.")
-
+                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بناءً على إشارة هبوط.")
+                    # إذا وصل السعر للهدف النهائي أو ضرب وقف الخسارة يتم إغلاق التوصية
                     elif current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -551,7 +592,6 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف.")
-
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
@@ -567,16 +607,14 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد ضرب وقف الخسارة.")
-
                 except Exception as e:
                     logger.error(f"❌ خطأ أثناء تتبع الإشارة {symbol}: {e}")
                     conn.rollback()
-
         except Exception as e:
             logger.error(f"❌ خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
 
-# ---------------------- تحليل السوق ----------------------
+# ---------------------- تحليل السوق (إنشاء توصيات جديدة) ----------------------
 def analyze_market():
     try:
         check_db_connection()
@@ -642,11 +680,9 @@ def analyze_market():
             except Exception as e:
                 logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
                 conn.rollback()
-
-            time.sleep(1)
+            time.sleep(1)  # تأخير لتفادي تجاوز معدل الطلبات
 
         logger.info("✅ انتهى فحص جميع الأزواج.")
-
     except Exception as e:
         logger.error(f"❌ خطأ في تحليل السوق: {e}")
 
