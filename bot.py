@@ -316,7 +316,7 @@ def get_market_dominance():
         return None, None
 
 # ---------------------- إرسال التنبيهات عبر Telegram ----------------------
-def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
+def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe):
     try:
         profit = round((signal['target'] / signal['price'] - 1) * 100, 2)
         loss = round((signal['stop_loss'] / signal['price'] - 1) * 100, 2)
@@ -326,6 +326,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance):
             f"▫️ السعر الحالي: ${signal['price']}\n"
             f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
             f"🛑 وقف الخسارة: ${signal['stop_loss']} ({loss}%)\n"
+            f"⏱ الفريم المستخدم: {timeframe}\n"
             f"💧 السيولة (15 دقيقة): {volume:,.2f} USDT\n"
             f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة على السوق (4H):**\n"
@@ -501,7 +502,6 @@ def track_signals():
 
                     # Handle sell signal
                     elif is_bearish:
-                        # Close the signal with a sell alert
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
                             f"⚠️ **إشارة بيع - {symbol}**\n"
@@ -581,61 +581,64 @@ def analyze_market():
 
         for symbol in symbols:
             logger.info(f"⏳ بدء فحص الزوج: {symbol}")
-            try:
-                # Fetch 1-minute data for the last 2 days
-                df_1m = fetch_historical_data(symbol, interval='1m', days=2)
-                if df_1m is None or len(df_1m) < 50:
-                    logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1m غير كافية.")
-                    continue
+            signal = None
+            timeframe_used = None
+
+            # محاولة الحصول على إشارة فريم 1m
+            df_1m = fetch_historical_data(symbol, interval='1m', days=2)
+            if df_1m is not None and len(df_1m) >= 50:
                 signal_1m = generate_signal_using_freqtrade_strategy(df_1m, symbol)
-                if not signal_1m:
-                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 1m للزوج {symbol}.")
-                    continue
+                if signal_1m:
+                    signal = signal_1m
+                    timeframe_used = "1m"
+                    logger.info(f"✅ تم الحصول على إشارة شراء على فريم 1m للزوج {symbol}.")
+            else:
+                logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1m غير كافية.")
 
-                # Fetch 15-minute data for the last 2 days
+            # إذا لم يتم الحصول على إشارة من فريم 1m، نجرب فريم 15m
+            if signal is None:
                 df_15m = fetch_historical_data(symbol, interval='15m', days=2)
-                if df_15m is None or len(df_15m) < 50:
+                if df_15m is not None and len(df_15m) >= 50:
+                    signal_15m = generate_signal_using_freqtrade_strategy(df_15m, symbol)
+                    if signal_15m:
+                        signal = signal_15m
+                        timeframe_used = "15m"
+                        logger.info(f"✅ تم الحصول على إشارة شراء على فريم 15m للزوج {symbol}.")
+                else:
                     logger.warning(f"⚠️ تجاهل {symbol} - بيانات 15m غير كافية.")
-                    continue
-                signal_15m = generate_signal_using_freqtrade_strategy(df_15m, symbol)
-                if not signal_15m:
-                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 15m للزوج {symbol}.")
-                    continue
 
-                # If buy signals are generated on both timeframes, send the alert
-                volume_15m = fetch_recent_volume(symbol)
-                if volume_15m < 40000:
-                    logger.info(f"⚠️ تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}.")
-                    continue
-
-                logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol}.")
-                send_telegram_alert(signal_1m, volume_15m, btc_dominance, eth_dominance)
-
-                try:
-                    cur.execute("""
-                        INSERT INTO signals 
-                        (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
-                        VALUES (%s, %s, %s, %s, %s, %s)
-                    """, (
-                        signal_1m['symbol'],
-                        signal_1m['price'],
-                        signal_1m['target'],
-                        signal_1m['stop_loss'],
-                        signal_1m.get('confidence', 100),
-                        volume_15m
-                    ))
-                    conn.commit()
-                    logger.info(f"✅ تم إدخال الإشارة بنجاح للزوج {symbol}.")
-                except Exception as e:
-                    logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
-                    conn.rollback()
-
-                time.sleep(1)  # Add a delay to avoid API rate limits
-
-            except Exception as e:
-                logger.error(f"❌ خطأ في معالجة الزوج {symbol}: {e}")
-                conn.rollback()
+            if signal is None:
+                logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على أي فريم للزوج {symbol}.")
                 continue
+
+            volume_15m = fetch_recent_volume(symbol)
+            if volume_15m < 40000:
+                logger.info(f"⚠️ تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}.")
+                continue
+
+            logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} من الفريم {timeframe_used}.")
+            send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance, timeframe_used)
+
+            try:
+                cur.execute("""
+                    INSERT INTO signals 
+                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (
+                    signal['symbol'],
+                    signal['price'],
+                    signal['target'],
+                    signal['stop_loss'],
+                    signal.get('confidence', 100),
+                    volume_15m
+                ))
+                conn.commit()
+                logger.info(f"✅ تم إدخال الإشارة بنجاح للزوج {symbol}.")
+            except Exception as e:
+                logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
+                conn.rollback()
+
+            time.sleep(1)  # تأخير لتفادي تجاوز معدل الطلبات
 
         logger.info("✅ انتهى فحص جميع الأزواج.")
 
