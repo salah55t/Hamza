@@ -151,7 +151,6 @@ def is_hammer(row):
         return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
-    # شرط المطرقة: ظل سفلي طويل (على الأقل ضعف الجسم) وظل علوي ضعيف
     if body > 0 and lower_shadow >= 2 * body and upper_shadow <= 0.1 * body:
         return 100
     return 0
@@ -161,11 +160,9 @@ def compute_engulfing(df, idx):
         return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
-    # الابتلاع الصعودي
     if prev['close'] < prev['open'] and curr['close'] > curr['open']:
         if curr['open'] < prev['close'] and curr['close'] > prev['open']:
             return 100
-    # الابتلاع الهبوطي
     if prev['close'] > prev['open'] and curr['close'] < curr['open']:
         if curr['open'] > prev['close'] and curr['close'] < prev['open']:
             return -100
@@ -215,7 +212,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
-
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
@@ -226,7 +222,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         atr_multiplier = 1.5
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
-
         signal = {
             'symbol': symbol,
             'price': float(format(current_price, '.8f')),
@@ -485,7 +480,7 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # جلب بيانات الشموع لتحليل الأنماط
+                    # جلب بيانات الشموع (فريم 5m فقط)
                     df = fetch_historical_data(symbol, interval='5m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
@@ -505,11 +500,9 @@ def track_signals():
                         new_stop_loss = current_price - atr_multiplier * last_row['atr']
                         new_target = current_price + atr_multiplier * last_row['atr']
                         update_flag = False
-                        # تحديث الهدف إذا كانت القيمة الجديدة أعلى من الهدف الحالي
                         if new_target > target:
                             target = new_target
                             update_flag = True
-                        # تحديث وقف الخسارة إذا كانت القيمة الجديدة أعلى من وقف الخسارة الحالي (أي رفع الوقف لتأمين الأرباح)
                         if new_stop_loss > stop_loss:
                             stop_loss = new_stop_loss
                             update_flag = True
@@ -606,33 +599,21 @@ def analyze_market():
         for symbol in symbols:
             logger.info(f"⏳ بدء فحص الزوج: {symbol}")
             signal = None
-            timeframe_used = None
+            timeframe_used = "5m"
 
-            # محاولة الحصول على إشارة من فريم 1m أولاً
-            df_1m = fetch_historical_data(symbol, interval='1m', days=2)
-            if df_1m is not None and len(df_1m) >= 50:
-                signal_1m = generate_signal_using_freqtrade_strategy(df_1m, symbol)
-                if signal_1m:
-                    signal = signal_1m
-                    timeframe_used = "1m"
-                    logger.info(f"✅ تم الحصول على إشارة شراء على فريم 1m للزوج {symbol}.")
-            else:
-                logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1m غير كافية.")
-
-            # إذا لم نحصل على إشارة من فريم 1m، نجرب فريم 15m
-            if signal is None:
-                df_15m = fetch_historical_data(symbol, interval='15m', days=2)
-                if df_15m is not None and len(df_15m) >= 50:
-                    signal_15m = generate_signal_using_freqtrade_strategy(df_15m, symbol)
-                    if signal_15m:
-                        signal = signal_15m
-                        timeframe_used = "15m"
-                        logger.info(f"✅ تم الحصول على إشارة شراء على فريم 15m للزوج {symbol}.")
+            # استخدام بيانات فريم 5m فقط
+            df_5m = fetch_historical_data(symbol, interval='5m', days=2)
+            if df_5m is not None and len(df_5m) >= 50:
+                signal_5m = generate_signal_using_freqtrade_strategy(df_5m, symbol)
+                if signal_5m:
+                    signal = signal_5m
+                    logger.info(f"✅ تم الحصول على إشارة شراء على فريم 5m للزوج {symbol}.")
                 else:
-                    logger.warning(f"⚠️ تجاهل {symbol} - بيانات 15m غير كافية.")
+                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 5m للزوج {symbol}.")
+            else:
+                logger.warning(f"⚠️ تجاهل {symbol} - بيانات 5m غير كافية.")
 
             if signal is None:
-                logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على أي فريم للزوج {symbol}.")
                 continue
 
             volume_15m = fetch_recent_volume(symbol)
@@ -640,7 +621,7 @@ def analyze_market():
                 logger.info(f"⚠️ تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}.")
                 continue
 
-            logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} من الفريم {timeframe_used}.")
+            logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} من فريم {timeframe_used}.")
             send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance, timeframe_used)
 
             try:
@@ -662,7 +643,7 @@ def analyze_market():
                 logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
                 conn.rollback()
 
-            time.sleep(1)  # تأخير لتفادي تجاوز معدل الطلبات
+            time.sleep(1)
 
         logger.info("✅ انتهى فحص جميع الأزواج.")
 
