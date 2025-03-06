@@ -13,7 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-import ta  # لا تزال تستخدم لحساب المؤشرات الفنية (مثل EMA, RSI, ATR)
+import ta  # تُستخدم لحساب المؤشرات الفنية (EMA, RSI, ATR)
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -157,28 +157,24 @@ def is_hammer(row):
     return 0
 
 def compute_engulfing(df, idx):
-    # إذا كانت الشمعة الأولى فلا يمكن حساب نمط الابتلاع
     if idx == 0:
         return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
-    # الابتلاع الصعودي: الشمعة السابقة هبوطية (close < open) والشمعة الحالية صعودية (close > open)
+    # الابتلاع الصعودي
     if prev['close'] < prev['open'] and curr['close'] > curr['open']:
         if curr['open'] < prev['close'] and curr['close'] > prev['open']:
             return 100
-    # الابتلاع الهبوطي: الشمعة السابقة صعودية والشمعة الحالية هبوطية
+    # الابتلاع الهبوطي
     if prev['close'] > prev['open'] and curr['close'] < curr['open']:
         if curr['open'] > prev['close'] and curr['close'] < prev['open']:
             return -100
     return 0
 
 def detect_candlestick_patterns(df):
-    # إنشاء أعمدة للكشف عن الأنماط
     df['Hammer'] = df.apply(is_hammer, axis=1)
     df['Engulfing'] = [compute_engulfing(df, i) for i in range(len(df))]
-    # اعتبار أن أي قيمة 100 في إحدى الأعمدة تشير إلى نمط صعودي
     df['Bullish'] = df.apply(lambda row: 100 if row['Hammer'] == 100 or row['Engulfing'] == 100 else 0, axis=1)
-    # اعتبار أن وجود قيمة -100 في عمود Engulfing يشير إلى نمط هبوطي
     df['Bearish'] = df.apply(lambda row: 100 if row['Engulfing'] == -100 else 0, axis=1)
     logger.info("✅ تم تحليل الأنماط الشمعية باستخدام الدوال المخصصة.")
     return df
@@ -227,8 +223,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     if last_row.get('buy', 0) == 1:
         current_price = last_row['close']
         current_atr = last_row['atr']
-
-        # حساب الهدف ووقف الخسارة بشكل ديناميكي
         atr_multiplier = 1.5
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
@@ -497,7 +491,7 @@ def track_signals():
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
                     
-                    # تحليل الأنماط الشمعية باستخدام الدوال المخصصة
+                    # تحليل الأنماط باستخدام الدوال المخصصة
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
@@ -505,23 +499,30 @@ def track_signals():
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # تحديث الهدف ووقف الخسارة ديناميكياً إذا كان السعر يرتفع مع وجود نمط صعودي
+                    # تحديث الهدف ووقف الخسارة (Trailing) عند استمرار الصعود
                     if current_price > entry and is_bullish:
                         atr_multiplier = 1.5
                         new_stop_loss = current_price - atr_multiplier * last_row['atr']
                         new_target = current_price + atr_multiplier * last_row['atr']
-                        
-                        if new_stop_loss > stop_loss or new_target > target:
+                        update_flag = False
+                        # تحديث الهدف إذا كانت القيمة الجديدة أعلى من الهدف الحالي
+                        if new_target > target:
+                            target = new_target
+                            update_flag = True
+                        # تحديث وقف الخسارة إذا كانت القيمة الجديدة أعلى من وقف الخسارة الحالي (أي رفع الوقف لتأمين الأرباح)
+                        if new_stop_loss > stop_loss:
+                            stop_loss = new_stop_loss
+                            update_flag = True
+                        if update_flag:
                             msg = (
                                 f"🔄 **تحديث الهدف/وقف الخسارة - {symbol}**\n"
-                                f"• الهدف الجديد: ${new_target:.8f}\n"
-                                f"• وقف الخسارة الجديد: ${new_stop_loss:.8f}\n"
+                                f"• الهدف الجديد: ${target:.8f}\n"
+                                f"• وقف الخسارة الجديد: ${stop_loss:.8f}\n"
                             )
                             send_telegram_alert_special(msg)
-                            
                             cur.execute(
                                 "UPDATE signals SET target = %s, stop_loss = %s WHERE id = %s",
-                                (new_target, new_stop_loss, signal_id)
+                                (target, stop_loss, signal_id)
                             )
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
@@ -535,7 +536,6 @@ def track_signals():
                             f"• الربح/الخسارة: {profit:.2f}%\n"
                         )
                         send_telegram_alert_special(msg)
-                        
                         cur.execute(
                             "UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s",
                             (signal_id,)
