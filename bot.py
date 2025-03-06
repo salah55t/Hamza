@@ -13,7 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-import ta
+import ta  # لا تزال تستخدم لحساب المؤشرات الفنية (مثل EMA, RSI, ATR)
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -139,18 +139,48 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"✅ تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
-# ---------------------- كشف الأنماط الشمعية ----------------------
+# ---------------------- دوال الكشف عن الأنماط الشمعية بدون TA-Lib ----------------------
+def is_hammer(row):
+    open_price = row['open']
+    high = row['high']
+    low = row['low']
+    close = row['close']
+    body = abs(close - open_price)
+    candle_range = high - low
+    if candle_range == 0:
+        return 0
+    lower_shadow = min(open_price, close) - low
+    upper_shadow = high - max(open_price, close)
+    # شرط المطرقة: ظل سفلي طويل (على الأقل ضعف الجسم) وظل علوي ضعيف
+    if body > 0 and lower_shadow >= 2 * body and upper_shadow <= 0.1 * body:
+        return 100
+    return 0
+
+def compute_engulfing(df, idx):
+    # إذا كانت الشمعة الأولى فلا يمكن حساب نمط الابتلاع
+    if idx == 0:
+        return 0
+    prev = df.iloc[idx - 1]
+    curr = df.iloc[idx]
+    # الابتلاع الصعودي: الشمعة السابقة هبوطية (close < open) والشمعة الحالية صعودية (close > open)
+    if prev['close'] < prev['open'] and curr['close'] > curr['open']:
+        if curr['open'] < prev['close'] and curr['close'] > prev['open']:
+            return 100
+    # الابتلاع الهبوطي: الشمعة السابقة صعودية والشمعة الحالية هبوطية
+    if prev['close'] > prev['open'] and curr['close'] < curr['open']:
+        if curr['open'] > prev['close'] and curr['close'] < prev['open']:
+            return -100
+    return 0
+
 def detect_candlestick_patterns(df):
-    patterns = {
-        'CDLHAMMER': ta.candlestick.cdl_hammer,
-        'CDLENGULFING': ta.candlestick.cdl_engulfing,
-        'CDLMORNINGSTAR': ta.candlestick.cdl_morning_star,
-        'CDLEVENINGSTAR': ta.candlestick.cdl_evening_star,
-        'CDLSHOOTINGSTAR': ta.candlestick.cdl_shooting_star,
-    }
-    for name, func in patterns.items():
-        df[name] = func(df['open'], df['high'], df['low'], df['close'])
-    logger.info("✅ تم تحليل الأنماط الشمعية.")
+    # إنشاء أعمدة للكشف عن الأنماط
+    df['Hammer'] = df.apply(is_hammer, axis=1)
+    df['Engulfing'] = [compute_engulfing(df, i) for i in range(len(df))]
+    # اعتبار أن أي قيمة 100 في إحدى الأعمدة تشير إلى نمط صعودي
+    df['Bullish'] = df.apply(lambda row: 100 if row['Hammer'] == 100 or row['Engulfing'] == 100 else 0, axis=1)
+    # اعتبار أن وجود قيمة -100 في عمود Engulfing يشير إلى نمط هبوطي
+    df['Bearish'] = df.apply(lambda row: 100 if row['Engulfing'] == -100 else 0, axis=1)
+    logger.info("✅ تم تحليل الأنماط الشمعية باستخدام الدوال المخصصة.")
     return df
 
 # ---------------------- تعريف استراتيجية Freqtrade ----------------------
@@ -198,7 +228,7 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         current_price = last_row['close']
         current_atr = last_row['atr']
 
-        # Calculate dynamic target and stop loss
+        # حساب الهدف ووقف الخسارة بشكل ديناميكي
         atr_multiplier = 1.5
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
@@ -461,26 +491,22 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # Fetch recent candlestick data for pattern analysis
+                    # جلب بيانات الشموع لتحليل الأنماط
                     df = fetch_historical_data(symbol, interval='5m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
                     
-                    # Detect candlestick patterns
+                    # تحليل الأنماط الشمعية باستخدام الدوال المخصصة
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
-                    # Check for bullish continuation patterns
-                    bullish_patterns = ['CDLHAMMER', 'CDLENGULFING', 'CDLMORNINGSTAR']
-                    bearish_patterns = ['CDLEVENINGSTAR', 'CDLSHOOTINGSTAR']
+                    # استخدام الأعمدة Bullish و Bearish لتحديد الاتجاه
+                    is_bullish = last_row['Bullish'] != 0
+                    is_bearish = last_row['Bearish'] != 0
 
-                    is_bullish = any(last_row[pattern] != 0 for pattern in bullish_patterns)
-                    is_bearish = any(last_row[pattern] != 0 for pattern in bearish_patterns)
-
-                    # Update target and stop loss dynamically
+                    # تحديث الهدف ووقف الخسارة ديناميكياً إذا كان السعر يرتفع مع وجود نمط صعودي
                     if current_price > entry and is_bullish:
-                        # Increase stop loss and target if price rises and bullish patterns exist
                         atr_multiplier = 1.5
                         new_stop_loss = current_price - atr_multiplier * last_row['atr']
                         new_target = current_price + atr_multiplier * last_row['atr']
@@ -500,7 +526,6 @@ def track_signals():
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
 
-                    # Handle sell signal
                     elif is_bearish:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -518,7 +543,6 @@ def track_signals():
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بسبب إشارة بيع.")
 
-                    # Check if target or stop loss is hit
                     elif current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -584,7 +608,7 @@ def analyze_market():
             signal = None
             timeframe_used = None
 
-            # محاولة الحصول على إشارة فريم 1m
+            # محاولة الحصول على إشارة من فريم 1m أولاً
             df_1m = fetch_historical_data(symbol, interval='1m', days=2)
             if df_1m is not None and len(df_1m) >= 50:
                 signal_1m = generate_signal_using_freqtrade_strategy(df_1m, symbol)
@@ -595,7 +619,7 @@ def analyze_market():
             else:
                 logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1m غير كافية.")
 
-            # إذا لم يتم الحصول على إشارة من فريم 1m، نجرب فريم 15m
+            # إذا لم نحصل على إشارة من فريم 1m، نجرب فريم 15m
             if signal is None:
                 df_15m = fetch_historical_data(symbol, interval='15m', days=2)
                 if df_15m is not None and len(df_15m) >= 50:
