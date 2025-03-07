@@ -212,7 +212,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
-
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
@@ -224,7 +223,7 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
 
-        # الشرط الإضافي لقبول التوصية فقط إذا كان الربح المتوقع أكثر من 1%
+        # قبول الإشارة فقط إذا كانت نسبة الربح المتوقعة تزيد عن 1%
         profit_margin = (target / current_price - 1) * 100
         if profit_margin < 1:
             logger.info(f"⚠️ إشارة {symbol} لا تضمن ربح أكثر من 1% (الربح المتوقع: {profit_margin:.2f}%).")
@@ -488,22 +487,23 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # جلب بيانات الشموع لفريم 5m وحساب المؤشرات الفنية أولاً
-                    df = fetch_historical_data(symbol, interval='5m', days=1)
+                    # جلب بيانات الشموع لفريم 15m لتحليل التوصية المتتبعة
+                    df = fetch_historical_data(symbol, interval='15m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
 
+                    # حساب المؤشرات الفنية على بيانات 15m
                     strategy = FreqtradeStrategy()
                     df = strategy.populate_indicators(df)
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
-                    # استخدام الأعمدة Bullish و Bearish لتحديد الاتجاه
+                    # تحليل الاتجاه باستخدام أعمدة Bullish و Bearish
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # تحديث الهدف ووقف الخسارة (Trailing) عند استمرار الصعود
+                    # إذا كان التحليل يشير إلى استمرار الصعود، يتم رفع الهدف ووقف الخسارة (Trailing)
                     if current_price > entry and is_bullish:
                         atr_multiplier = 1.5
                         new_stop_loss = current_price - atr_multiplier * last_row['atr']
@@ -528,7 +528,7 @@ def track_signals():
                             )
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
-
+                    # إذا كان التحليل يعطي إشارة هبوط، يتم إغلاق التوصية
                     elif is_bearish:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -543,8 +543,8 @@ def track_signals():
                             (signal_id,)
                         )
                         conn.commit()
-                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بسبب إشارة بيع.")
-
+                        logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بناءً على إشارة هبوط.")
+                    # إذا تحقق الهدف، يتم إغلاق التوصية مع تحقيق الربح
                     elif current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -560,7 +560,7 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف.")
-
+                    # إذا وصل السعر إلى وقف الخسارة، يتم إغلاق التوصية
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
@@ -576,11 +576,9 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد ضرب وقف الخسارة.")
-
                 except Exception as e:
                     logger.error(f"❌ خطأ أثناء تتبع الإشارة {symbol}: {e}")
                     conn.rollback()
-
         except Exception as e:
             logger.error(f"❌ خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
@@ -610,6 +608,7 @@ def analyze_market():
             signal = None
             timeframe_used = "5m"
 
+            # توليد الإشارة على فريم 5m كما هو سابقًا
             df_5m = fetch_historical_data(symbol, interval='5m', days=2)
             if df_5m is not None and len(df_5m) >= 50:
                 signal_5m = generate_signal_using_freqtrade_strategy(df_5m, symbol)
@@ -654,7 +653,6 @@ def analyze_market():
             time.sleep(1)
 
         logger.info("✅ انتهى فحص جميع الأزواج.")
-
     except Exception as e:
         logger.error(f"❌ خطأ في تحليل السوق: {e}")
 
