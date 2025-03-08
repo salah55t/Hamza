@@ -176,6 +176,31 @@ def detect_candlestick_patterns(df):
     logger.info("✅ تم تحليل الأنماط الشمعية باستخدام الدوال المخصصة.")
     return df
 
+# ---------------------- دوال التنبؤ وتحليل المشاعر (Placeholder) ----------------------
+def ml_predict_signal(symbol, df):
+    """
+    دالة تنبؤية تجريبية تعتمد على مؤشر RSI كمؤشر بديل
+    ترجع ثقة من 0 إلى 1؛ قيمة أعلى تعني توقع استمرار الصعود.
+    """
+    try:
+        rsi = df['rsi'].iloc[-1]
+        # إذا كان RSI بين 55 و65 نعتبره مؤشرًا قويًا
+        if 55 < rsi < 65:
+            return 0.8
+        else:
+            return 0.5
+    except Exception as e:
+        logger.error(f"❌ خطأ في ml_predict_signal لـ {symbol}: {e}")
+        return 0.5
+
+def get_market_sentiment(symbol):
+    """
+    دالة تحليل مشاعر تجريبية.
+    في التطبيق الحقيقي يمكن ربطها ببيانات خارجية.
+    هنا نُعيد قيمة ثابتة إيجابية كتجربة.
+    """
+    return 0.7
+
 # ---------------------- تعريف استراتيجية Freqtrade ----------------------
 class FreqtradeStrategy:
     stoploss = -0.02
@@ -212,6 +237,7 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
+
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
@@ -271,7 +297,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-36k1.onrender.com/webhook"
+    webhook_url = "https://hamza-1.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -459,7 +485,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات ----------------------
+# ---------------------- خدمة تتبع الإشارات مع تحليل اتجاه التوصيات ----------------------
 def track_signals():
     logger.info("⏳ بدء خدمة تتبع الإشارات...")
     while True:
@@ -487,27 +513,35 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # جلب بيانات الشموع لفريم 15m لتحليل التوصية المتتبعة
+                    # جلب بيانات الشموع لفريم 15m لتحليل اتجاه التوصية
                     df = fetch_historical_data(symbol, interval='15m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
 
-                    # حساب المؤشرات الفنية على بيانات 15m
+                    # حساب المؤشرات الفنية ونماذج الشموع
                     strategy = FreqtradeStrategy()
                     df = strategy.populate_indicators(df)
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
-                    # تحليل الاتجاه باستخدام أعمدة Bullish و Bearish
+                    # استخدام دوال التنبؤ وتحليل المشاعر
+                    ml_confidence = ml_predict_signal(symbol, df)
+                    sentiment = get_market_sentiment(symbol)
+
+                    # تحليل الاتجاه: إذا كانت النماذج تُشير إلى صعود Bullish
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # إذا كان التحليل يشير إلى استمرار الصعود، يتم رفع الهدف ووقف الخسارة (Trailing)
+                    # في حالة استمرار الصعود: تعديل الهدف ووقف الخسارة باستخدام آلية Trailing
                     if current_price > entry and is_bullish:
-                        atr_multiplier = 1.5
-                        new_stop_loss = current_price - atr_multiplier * last_row['atr']
-                        new_target = current_price + atr_multiplier * last_row['atr']
+                        # إذا كانت ثقة النموذج والمشاعر إيجابية، نزيد المضاعف قليلاً
+                        if ml_confidence >= 0.7 and sentiment >= 0.5:
+                            adjusted_multiplier = 1.8
+                        else:
+                            adjusted_multiplier = 1.5
+                        new_stop_loss = current_price - adjusted_multiplier * last_row['atr']
+                        new_target = current_price + adjusted_multiplier * last_row['atr']
                         update_flag = False
                         if new_target > target:
                             target = new_target
@@ -520,6 +554,7 @@ def track_signals():
                                 f"🔄 **تحديث الهدف/وقف الخسارة - {symbol}**\n"
                                 f"• الهدف الجديد: ${target:.8f}\n"
                                 f"• وقف الخسارة الجديد: ${stop_loss:.8f}\n"
+                                f"• (ml_confidence: {ml_confidence:.2f}, sentiment: {sentiment:.2f})\n"
                             )
                             send_telegram_alert_special(msg)
                             cur.execute(
@@ -528,11 +563,11 @@ def track_signals():
                             )
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
-                    # إذا كان التحليل يعطي إشارة هبوط، يتم إغلاق التوصية
+                    # إذا كان التحليل يعطي إشارة هبوط، يتم إغلاق التوصية لتقليل الخسائر أو تأمين ربح بسيط
                     elif is_bearish:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
-                            f"⚠️ **إشارة بيع - {symbol}**\n"
+                            f"⚠️ **إشارة بيع - {symbol} (هبوط)**\n"
                             f"• سعر الدخول: ${entry:.8f}\n"
                             f"• سعر البيع: ${current_price:.8f}\n"
                             f"• الربح/الخسارة: {profit:.2f}%\n"
@@ -608,7 +643,6 @@ def analyze_market():
             signal = None
             timeframe_used = "5m"
 
-            # توليد الإشارة على فريم 5m كما هو سابقًا
             df_5m = fetch_historical_data(symbol, interval='5m', days=2)
             if df_5m is not None and len(df_5m) >= 50:
                 signal_5m = generate_signal_using_freqtrade_strategy(df_5m, symbol)
