@@ -13,7 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-import ta  # تُستخدم لحساب المؤشرات الفنية (EMA, RSI, ATR)
+import ta  # تُستخدم لحساب المؤشرات الفنية مثل EMA, RSI, ATR
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -184,7 +184,6 @@ def ml_predict_signal(symbol, df):
     """
     try:
         rsi = df['rsi'].iloc[-1]
-        # اعتبار RSI بين 55 و65 مؤشر جيد للتوقع الصعودي
         if 55 < rsi < 65:
             return 0.8
         else:
@@ -236,7 +235,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
-
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
@@ -483,7 +481,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ [Report] فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات (فحص التوصيات على فريم 1h) ----------------------
+# ---------------------- خدمة تتبع الإشارات (متابعة التوصيات على فريم 1h) ----------------------
 def track_signals():
     logger.info("⏳ [Track] بدء خدمة تتبع الإشارات (فريم 1h)...")
     while True:
@@ -523,14 +521,12 @@ def track_signals():
                     df = detect_candlestick_patterns(df)
                     last_row = df.iloc[-1]
 
-                    # استخدام دوال التنبؤ وتحليل المشاعر
                     ml_confidence = ml_predict_signal(symbol, df)
                     sentiment = get_market_sentiment(symbol)
 
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # إذا كان السعر فوق الدخول واتجاه الشموع صعودي، يتم رفع الهدف ووقف الخسارة
                     if current_price > entry and is_bullish:
                         if ml_confidence >= 0.7 and sentiment >= 0.5:
                             adjusted_multiplier = 1.8
@@ -620,7 +616,7 @@ def analyze_market():
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
         active_count = cur.fetchone()[0]
         if active_count >= 4:
-            logger.info(f"⚠️ [Market] تم فتح {active_count} صفقة مفتوحة (الحد 4)، لن يتم توليد إشارة جديدة.")
+            logger.info(f"⚠️ [Market] {active_count} صفقات مفتوحة (الحد 4)، لن يتم توليد إشارة جديدة.")
             return
 
         btc_dominance, eth_dominance = get_market_dominance()
@@ -637,7 +633,8 @@ def analyze_market():
             logger.info("==========================================")
             logger.info(f"⏳ [Market] بدء فحص الزوج: {symbol} (فريم 4h)")
             signal = None
-            df_4h = fetch_historical_data(symbol, interval='4h', days=2)
+            # زيادة الفترة لجلب بيانات كافية: 10 أيام تضمن الحصول على أكثر من 50 شمعة
+            df_4h = fetch_historical_data(symbol, interval='4h', days=10)
             if df_4h is not None and len(df_4h) >= 50:
                 signal_4h = generate_signal_using_freqtrade_strategy(df_4h, symbol)
                 if signal_4h:
