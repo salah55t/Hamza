@@ -179,12 +179,11 @@ def detect_candlestick_patterns(df):
 # ---------------------- دوال التنبؤ وتحليل المشاعر (Placeholder) ----------------------
 def ml_predict_signal(symbol, df):
     """
-    دالة تنبؤية تجريبية تعتمد على مؤشر RSI كمؤشر بديل
-    ترجع ثقة من 0 إلى 1؛ قيمة أعلى تعني توقع استمرار الصعود.
+    دالة تنبؤية تجريبية تعتمد على مؤشر RSI كمؤشر بديل.
+    ترجع قيمة ثقة بين 0 و 1.
     """
     try:
         rsi = df['rsi'].iloc[-1]
-        # إذا كان RSI بين 55 و65 نعتبره مؤشرًا قويًا
         if 55 < rsi < 65:
             return 0.8
         else:
@@ -196,7 +195,6 @@ def ml_predict_signal(symbol, df):
 def get_market_sentiment(symbol):
     """
     دالة تحليل مشاعر تجريبية.
-    في التطبيق الحقيقي يمكن ربطها ببيانات خارجية.
     هنا نُعيد قيمة ثابتة إيجابية كتجربة.
     """
     return 0.7
@@ -237,7 +235,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
     df = df.dropna().reset_index(drop=True)
     if len(df) < 50:
         return None
-
     strategy = FreqtradeStrategy()
     df = strategy.populate_indicators(df)
     df = strategy.populate_buy_trend(df)
@@ -249,7 +246,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
         target = current_price + atr_multiplier * current_atr
         stop_loss = current_price - atr_multiplier * current_atr
 
-        # قبول الإشارة فقط إذا كانت نسبة الربح المتوقعة تزيد عن 1%
         profit_margin = (target / current_price - 1) * 100
         if profit_margin < 1:
             logger.info(f"⚠️ إشارة {symbol} لا تضمن ربح أكثر من 1% (الربح المتوقع: {profit_margin:.2f}%).")
@@ -297,7 +293,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-1.onrender.com/webhook"
+    webhook_url = "https://hamza-36k1.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -485,9 +481,9 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات مع تحليل اتجاه التوصيات ----------------------
+# ---------------------- خدمة تتبع الإشارات مع تحليل الاتجاه (فريم 30m) ----------------------
 def track_signals():
-    logger.info("⏳ بدء خدمة تتبع الإشارات...")
+    logger.info("⏳ بدء خدمة تتبع الإشارات (فريم 30m)...")
     while True:
         try:
             check_db_connection()
@@ -513,8 +509,8 @@ def track_signals():
                         logger.error(f"❌ سعر الدخول للزوج {symbol} صفر تقريباً، يتم تخطي الحساب.")
                         continue
 
-                    # جلب بيانات الشموع لفريم 15m لتحليل اتجاه التوصية
-                    df = fetch_historical_data(symbol, interval='15m', days=1)
+                    # جلب بيانات الشموع لفريم 30m لتحليل الاتجاه
+                    df = fetch_historical_data(symbol, interval='30m', days=1)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
@@ -529,13 +525,11 @@ def track_signals():
                     ml_confidence = ml_predict_signal(symbol, df)
                     sentiment = get_market_sentiment(symbol)
 
-                    # تحليل الاتجاه: إذا كانت النماذج تُشير إلى صعود Bullish
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # في حالة استمرار الصعود: تعديل الهدف ووقف الخسارة باستخدام آلية Trailing
+                    # إذا كان السعر فوق الدخول واتجهنا لصعود مع ثقة تنبؤية إيجابية ومشاعر إيجابية
                     if current_price > entry and is_bullish:
-                        # إذا كانت ثقة النموذج والمشاعر إيجابية، نزيد المضاعف قليلاً
                         if ml_confidence >= 0.7 and sentiment >= 0.5:
                             adjusted_multiplier = 1.8
                         else:
@@ -563,7 +557,6 @@ def track_signals():
                             )
                             conn.commit()
                             logger.info(f"✅ تم تحديث الهدف ووقف الخسارة للزوج {symbol}.")
-                    # إذا كان التحليل يعطي إشارة هبوط، يتم إغلاق التوصية لتقليل الخسائر أو تأمين ربح بسيط
                     elif is_bearish:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -579,7 +572,6 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بناءً على إشارة هبوط.")
-                    # إذا تحقق الهدف، يتم إغلاق التوصية مع تحقيق الربح
                     elif current_price >= target:
                         profit = ((current_price - entry) / entry) * 100
                         msg = (
@@ -595,7 +587,6 @@ def track_signals():
                         )
                         conn.commit()
                         logger.info(f"✅ تم إغلاق التوصية للزوج {symbol} بعد تحقيق الهدف.")
-                    # إذا وصل السعر إلى وقف الخسارة، يتم إغلاق التوصية
                     elif current_price <= stop_loss:
                         loss = ((current_price - entry) / entry) * 100
                         msg = (
@@ -618,7 +609,7 @@ def track_signals():
             logger.error(f"❌ خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
 
-# ---------------------- تحليل السوق ----------------------
+# ---------------------- تحليل السوق (فحص التوصيات على فريم 1h) ----------------------
 def analyze_market():
     try:
         check_db_connection()
@@ -641,30 +632,25 @@ def analyze_market():
         for symbol in symbols:
             logger.info(f"⏳ بدء فحص الزوج: {symbol}")
             signal = None
-            timeframe_used = "5m"
-
-            df_5m = fetch_historical_data(symbol, interval='5m', days=2)
-            if df_5m is not None and len(df_5m) >= 50:
-                signal_5m = generate_signal_using_freqtrade_strategy(df_5m, symbol)
-                if signal_5m:
-                    signal = signal_5m
-                    logger.info(f"✅ تم الحصول على إشارة شراء على فريم 5m للزوج {symbol}.")
+            timeframe_used = "1h"
+            df_1h = fetch_historical_data(symbol, interval='1h', days=2)
+            if df_1h is not None and len(df_1h) >= 50:
+                signal_1h = generate_signal_using_freqtrade_strategy(df_1h, symbol)
+                if signal_1h:
+                    signal = signal_1h
+                    logger.info(f"✅ تم الحصول على إشارة شراء على فريم 1h للزوج {symbol}.")
                 else:
-                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 5m للزوج {symbol}.")
+                    logger.info(f"⚠️ لم يتم الحصول على إشارة شراء على فريم 1h للزوج {symbol}.")
             else:
-                logger.warning(f"⚠️ تجاهل {symbol} - بيانات 5m غير كافية.")
-
+                logger.warning(f"⚠️ تجاهل {symbol} - بيانات 1h غير كافية.")
             if signal is None:
                 continue
-
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 40000:
                 logger.info(f"⚠️ تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f}.")
                 continue
-
             logger.info(f"✅ الشروط مستوفاة؛ سيتم إرسال تنبيه للزوج {symbol} من فريم {timeframe_used}.")
             send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance, timeframe_used)
-
             try:
                 cur.execute("""
                     INSERT INTO signals 
@@ -683,9 +669,7 @@ def analyze_market():
             except Exception as e:
                 logger.error(f"❌ فشل إدخال الإشارة للزوج {symbol}: {e}")
                 conn.rollback()
-
             time.sleep(1)
-
         logger.info("✅ انتهى فحص جميع الأزواج.")
     except Exception as e:
         logger.error(f"❌ خطأ في تحليل السوق: {e}")
@@ -714,11 +698,9 @@ if __name__ == '__main__':
     Thread(target=run_ticker_socket_manager, daemon=True).start()
     test_telegram()
     logger.info("✅ تم بدء التشغيل بنجاح!")
-
     scheduler = BackgroundScheduler()
     scheduler.add_job(analyze_market, 'interval', minutes=5)
     scheduler.start()
-
     try:
         while True:
             time.sleep(60)
