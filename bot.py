@@ -49,6 +49,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
+        # إضافة عمود last_update_pct لتخزين آخر نسبة ربح تم تحديثها
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -58,6 +59,7 @@ def init_db():
                 stop_loss DOUBLE PRECISION,
                 r2_score DOUBLE PRECISION,
                 volume_15m DOUBLE PRECISION,
+                last_update_pct DOUBLE PRECISION DEFAULT 0,
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
@@ -316,7 +318,8 @@ def get_crypto_symbols():
         logger.error(f"❌ [Data] خطأ في قراءة الملف: {e}")
         return []
 
-def fetch_historical_data(symbol, interval='4h', days=3):
+# هنا نستخدم فريم 4h لتوليد الإشارات
+def fetch_historical_data(symbol, interval='4h', days=10):
     try:
         logger.info(f"⏳ [Data] بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام.")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -487,8 +490,9 @@ def track_signals():
     while True:
         try:
             check_db_connection()
+            # تعديل الاستعلام ليشمل عمود last_update_pct
             cur.execute("""
-                SELECT id, symbol, entry_price, target, stop_loss 
+                SELECT id, symbol, entry_price, target, stop_loss, last_update_pct 
                 FROM signals 
                 WHERE achieved_target = FALSE 
                   AND hit_stop_loss = FALSE 
@@ -498,7 +502,7 @@ def track_signals():
             logger.info("==========================================")
             logger.info(f"✅ [Track] عدد التوصيات المفتوحة: {len(active_signals)}")
             for signal in active_signals:
-                signal_id, symbol, entry, target, stop_loss = signal
+                signal_id, symbol, entry, target, stop_loss, last_update_pct = signal
                 try:
                     if symbol in ticker_data:
                         current_price = float(ticker_data[symbol].get('c', 0))
@@ -527,7 +531,10 @@ def track_signals():
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    if current_price > entry and is_bullish:
+                    # حساب نسبة الزيادة الحالية من سعر الدخول
+                    current_gain_pct = (current_price - entry) / entry
+                    # إذا زادت نسبة الزيادة عن آخر تحديث بمقدار 1%، نقوم بتحديث الهدف ووقف الخسارة
+                    if current_gain_pct >= last_update_pct + 0.01 and current_price > entry and is_bullish:
                         if ml_confidence >= 0.7 and sentiment >= 0.5:
                             adjusted_multiplier = 1.8
                         else:
@@ -542,16 +549,19 @@ def track_signals():
                             stop_loss = new_stop_loss
                             update_flag = True
                         if update_flag:
+                            # تحديث last_update_pct إلى النسبة الحالية (تقريباً)
+                            last_update_pct = current_gain_pct
                             msg = (
                                 f"🔄 [Track] تحديث {symbol}:\n"
                                 f"• الهدف الجديد: ${target:.8f}\n"
                                 f"• وقف الخسارة الجديد: ${stop_loss:.8f}\n"
+                                f"• نسبة الزيادة: {current_gain_pct*100:.2f}%\n"
                                 f"• (ML: {ml_confidence:.2f}, Sentiment: {sentiment:.2f})"
                             )
                             send_telegram_alert_special(msg)
                             cur.execute(
-                                "UPDATE signals SET target = %s, stop_loss = %s WHERE id = %s",
-                                (target, stop_loss, signal_id)
+                                "UPDATE signals SET target = %s, stop_loss = %s, last_update_pct = %s WHERE id = %s",
+                                (target, stop_loss, last_update_pct, signal_id)
                             )
                             conn.commit()
                             logger.info(f"✅ [Track] تم تحديث {symbol} بنجاح.")
@@ -633,7 +643,6 @@ def analyze_market():
             logger.info("==========================================")
             logger.info(f"⏳ [Market] بدء فحص الزوج: {symbol} (فريم 4h)")
             signal = None
-            # زيادة الفترة لجلب بيانات كافية: 10 أيام تضمن الحصول على أكثر من 50 شمعة
             df_4h = fetch_historical_data(symbol, interval='4h', days=10)
             if df_4h is not None and len(df_4h) >= 50:
                 signal_4h = generate_signal_using_freqtrade_strategy(df_4h, symbol)
@@ -655,15 +664,16 @@ def analyze_market():
             try:
                 cur.execute("""
                     INSERT INTO signals 
-                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    (symbol, entry_price, target, stop_loss, r2_score, volume_15m, last_update_pct)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (
                     signal['symbol'],
                     signal['price'],
                     signal['target'],
                     signal['stop_loss'],
                     signal.get('confidence', 100),
-                    volume_15m
+                    volume_15m,
+                    0  # بدءاً بنسبة تحديث صفر
                 ))
                 conn.commit()
                 logger.info(f"✅ [Market] تم إدخال الإشارة بنجاح للزوج {symbol}.")
