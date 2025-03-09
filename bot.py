@@ -49,7 +49,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
-        # إضافة عمود last_update_pct لتخزين آخر نسبة ربح تم تحديثها
+        # إنشاء الجدول إذا لم يكن موجودًا (بدون العمود last_update_pct)
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -59,16 +59,16 @@ def init_db():
                 stop_loss DOUBLE PRECISION,
                 r2_score DOUBLE PRECISION,
                 volume_15m DOUBLE PRECISION,
-                last_update_pct DOUBLE PRECISION DEFAULT 0,
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
-                sent_at TIMESTAMP DEFAULT NOW(),
-                CONSTRAINT unique_symbol_time UNIQUE (symbol, sent_at)
+                sent_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        # إضافة العمود last_update_pct إذا لم يكن موجوداً
+        cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS last_update_pct DOUBLE PRECISION DEFAULT 0;")
         conn.commit()
-        logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح.")
+        logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح مع تحديث البنية.")
     except Exception as e:
         logger.error(f"❌ [DB] فشل تهيئة قاعدة البيانات: {e}")
         raise
@@ -295,7 +295,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-36k1.onrender.com/webhook"
+    webhook_url = "https://hamza-1.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -318,7 +318,7 @@ def get_crypto_symbols():
         logger.error(f"❌ [Data] خطأ في قراءة الملف: {e}")
         return []
 
-# هنا نستخدم فريم 4h لتوليد الإشارات
+# استخدام فريم 4h لتوليد الإشارات مع جلب بيانات لمدة 10 أيام
 def fetch_historical_data(symbol, interval='4h', days=10):
     try:
         logger.info(f"⏳ [Data] بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام.")
@@ -490,7 +490,6 @@ def track_signals():
     while True:
         try:
             check_db_connection()
-            # تعديل الاستعلام ليشمل عمود last_update_pct
             cur.execute("""
                 SELECT id, symbol, entry_price, target, stop_loss, last_update_pct 
                 FROM signals 
@@ -527,13 +526,12 @@ def track_signals():
 
                     ml_confidence = ml_predict_signal(symbol, df)
                     sentiment = get_market_sentiment(symbol)
-
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
                     # حساب نسبة الزيادة الحالية من سعر الدخول
                     current_gain_pct = (current_price - entry) / entry
-                    # إذا زادت نسبة الزيادة عن آخر تحديث بمقدار 1%، نقوم بتحديث الهدف ووقف الخسارة
+                    # إذا زادت نسبة الزيادة بمقدار 1% مقارنةً بآخر تحديث
                     if current_gain_pct >= last_update_pct + 0.01 and current_price > entry and is_bullish:
                         if ml_confidence >= 0.7 and sentiment >= 0.5:
                             adjusted_multiplier = 1.8
@@ -549,7 +547,6 @@ def track_signals():
                             stop_loss = new_stop_loss
                             update_flag = True
                         if update_flag:
-                            # تحديث last_update_pct إلى النسبة الحالية (تقريباً)
                             last_update_pct = current_gain_pct
                             msg = (
                                 f"🔄 [Track] تحديث {symbol}:\n"
@@ -673,7 +670,7 @@ def analyze_market():
                     signal['stop_loss'],
                     signal.get('confidence', 100),
                     volume_15m,
-                    0  # بدءاً بنسبة تحديث صفر
+                    0
                 ))
                 conn.commit()
                 logger.info(f"✅ [Market] تم إدخال الإشارة بنجاح للزوج {symbol}.")
