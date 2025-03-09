@@ -49,7 +49,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
-        # إنشاء الجدول إذا لم يكن موجودًا (بدون العمود last_update_pct)
+        # إنشاء الجدول إذا لم يكن موجودًا بدون العمود last_update_pct
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -295,7 +295,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-1.onrender.com/webhook"
+    webhook_url = "https://hamza-36k1.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -513,8 +513,8 @@ def track_signals():
                         logger.error(f"❌ [Track] سعر الدخول للزوج {symbol} قريب من الصفر، تخطي الحساب.")
                         continue
 
-                    # استخدام بيانات فريم 1h لمتابعة التوصية
-                    df = fetch_historical_data(symbol, interval='1h', days=1)
+                    # استخدام بيانات فريم 1h لمتابعة التوصية (زيادة الفترة لجلب بيانات كافية)
+                    df = fetch_historical_data(symbol, interval='1h', days=3)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ [Track] بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
@@ -529,9 +529,7 @@ def track_signals():
                     is_bullish = last_row['Bullish'] != 0
                     is_bearish = last_row['Bearish'] != 0
 
-                    # حساب نسبة الزيادة الحالية من سعر الدخول
                     current_gain_pct = (current_price - entry) / entry
-                    # إذا زادت نسبة الزيادة بمقدار 1% مقارنةً بآخر تحديث
                     if current_gain_pct >= last_update_pct + 0.01 and current_price > entry and is_bullish:
                         if ml_confidence >= 0.7 and sentiment >= 0.5:
                             adjusted_multiplier = 1.8
