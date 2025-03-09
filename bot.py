@@ -49,7 +49,7 @@ def init_db():
         conn = psycopg2.connect(db_url)
         conn.autocommit = False
         cur = conn.cursor()
-        # إنشاء الجدول إذا لم يكن موجودًا بدون العمود last_update_pct
+        # إنشاء الجدول إذا لم يكن موجودًا
         cur.execute("""
             CREATE TABLE IF NOT EXISTS signals (
                 id SERIAL PRIMARY KEY,
@@ -205,7 +205,7 @@ def get_market_sentiment(symbol):
 class FreqtradeStrategy:
     stoploss = -0.02
     minimal_roi = {"0": 0.01}
-
+    
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         if len(df) < 50:
             return df
@@ -318,7 +318,7 @@ def get_crypto_symbols():
         logger.error(f"❌ [Data] خطأ في قراءة الملف: {e}")
         return []
 
-# استخدام فريم 4h لتوليد الإشارات مع جلب بيانات لمدة 10 أيام
+# استخدام فريم 4h لتوليد الإشارات مع بيانات 10 أيام
 def fetch_historical_data(symbol, interval='4h', days=10):
     try:
         logger.info(f"⏳ [Data] بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام.")
@@ -513,7 +513,7 @@ def track_signals():
                         logger.error(f"❌ [Track] سعر الدخول للزوج {symbol} قريب من الصفر، تخطي الحساب.")
                         continue
 
-                    # استخدام بيانات فريم 1h لمتابعة التوصية (زيادة الفترة لجلب بيانات كافية)
+                    # جلب بيانات فريم 1h على مدى 3 أيام لضمان توفر بيانات كافية
                     df = fetch_historical_data(symbol, interval='1h', days=3)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ [Track] بيانات الشموع غير كافية للزوج {symbol}.")
@@ -530,88 +530,63 @@ def track_signals():
                     is_bearish = last_row['Bearish'] != 0
 
                     current_gain_pct = (current_price - entry) / entry
-                    if current_gain_pct >= last_update_pct + 0.01 and current_price > entry and is_bullish:
-                        if ml_confidence >= 0.7 and sentiment >= 0.5:
-                            adjusted_multiplier = 1.8
-                        else:
-                            adjusted_multiplier = 1.5
-                        new_stop_loss = current_price - adjusted_multiplier * last_row['atr']
-                        new_target = current_price + adjusted_multiplier * last_row['atr']
-                        update_flag = False
-                        if new_target > target:
-                            target = new_target
-                            update_flag = True
-                        if new_stop_loss > stop_loss:
-                            stop_loss = new_stop_loss
-                            update_flag = True
-                        if update_flag:
-                            last_update_pct = current_gain_pct
+                    if current_gain_pct >= 0.01:  # فقط إذا وصلت الزيادة إلى 1%
+                        if is_bullish and current_gain_pct >= last_update_pct + 0.01:
+                            # تحديث الهدف ووقف الخسارة عند إشارة شراء
+                            if ml_confidence >= 0.7 and sentiment >= 0.5:
+                                adjusted_multiplier = 1.8
+                            else:
+                                adjusted_multiplier = 1.5
+                            new_stop_loss = current_price - adjusted_multiplier * last_row['atr']
+                            new_target = current_price + adjusted_multiplier * last_row['atr']
+                            update_flag = False
+                            if new_target > target:
+                                target = new_target
+                                update_flag = True
+                            if new_stop_loss > stop_loss:
+                                stop_loss = new_stop_loss
+                                update_flag = True
+                            if update_flag:
+                                last_update_pct = current_gain_pct
+                                msg = (
+                                    f"🔄 [Track] تحديث {symbol}:\n"
+                                    f"• الهدف الجديد: ${target:.8f}\n"
+                                    f"• وقف الخسارة الجديد: ${stop_loss:.8f}\n"
+                                    f"• نسبة الزيادة: {current_gain_pct*100:.2f}%\n"
+                                    f"• (ML: {ml_confidence:.2f}, Sentiment: {sentiment:.2f})"
+                                )
+                                send_telegram_alert_special(msg)
+                                cur.execute(
+                                    "UPDATE signals SET target = %s, stop_loss = %s, last_update_pct = %s WHERE id = %s",
+                                    (target, stop_loss, last_update_pct, signal_id)
+                                )
+                                conn.commit()
+                                logger.info(f"✅ [Track] تم تحديث {symbol} بنجاح.")
+                        elif is_bearish:
+                            # إغلاق التوصية عند إشارة بيع (مع تحقيق ربح 1%)
+                            profit = ((current_price - entry) / entry) * 100
                             msg = (
-                                f"🔄 [Track] تحديث {symbol}:\n"
-                                f"• الهدف الجديد: ${target:.8f}\n"
-                                f"• وقف الخسارة الجديد: ${stop_loss:.8f}\n"
-                                f"• نسبة الزيادة: {current_gain_pct*100:.2f}%\n"
-                                f"• (ML: {ml_confidence:.2f}, Sentiment: {sentiment:.2f})"
+                                f"⚠️ [Track] إشارة بيع (هبوط) للزوج {symbol}:\n"
+                                f"• الدخول: ${entry:.8f}\n"
+                                f"• البيع: ${current_price:.8f}\n"
+                                f"• الربح/الخسارة: {profit:.2f}%"
                             )
                             send_telegram_alert_special(msg)
                             cur.execute(
-                                "UPDATE signals SET target = %s, stop_loss = %s, last_update_pct = %s WHERE id = %s",
-                                (target, stop_loss, last_update_pct, signal_id)
+                                "UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s",
+                                (signal_id,)
                             )
                             conn.commit()
-                            logger.info(f"✅ [Track] تم تحديث {symbol} بنجاح.")
-                    elif is_bearish:
-                        profit = ((current_price - entry) / entry) * 100
-                        msg = (
-                            f"⚠️ [Track] إشارة بيع (هبوط) للزوج {symbol}:\n"
-                            f"• الدخول: ${entry:.8f}\n"
-                            f"• البيع: ${current_price:.8f}\n"
-                            f"• الربح/الخسارة: {profit:.2f}%"
-                        )
-                        send_telegram_alert_special(msg)
-                        cur.execute(
-                            "UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s",
-                            (signal_id,)
-                        )
-                        conn.commit()
-                        logger.info(f"✅ [Track] تم إغلاق {symbol} بناءً على إشارة هبوط.")
-                    elif current_price >= target:
-                        profit = ((current_price - entry) / entry) * 100
-                        msg = (
-                            f"🎉 [Track] تحقيق الهدف للزوج {symbol}:\n"
-                            f"• الدخول: ${entry:.8f}\n"
-                            f"• الخروج: ${current_price:.8f}\n"
-                            f"• الربح: +{profit:.2f}%"
-                        )
-                        send_telegram_alert_special(msg)
-                        cur.execute(
-                            "UPDATE signals SET achieved_target = TRUE, closed_at = NOW() WHERE id = %s",
-                            (signal_id,)
-                        )
-                        conn.commit()
-                        logger.info(f"✅ [Track] تم إغلاق {symbol} بعد تحقيق الهدف.")
-                    elif current_price <= stop_loss:
-                        loss = ((current_price - entry) / entry) * 100
-                        msg = (
-                            f"❌ [Track] ضرب وقف الخسارة للزوج {symbol}:\n"
-                            f"• الدخول: ${entry:.8f}\n"
-                            f"• الخروج: ${current_price:.8f}\n"
-                            f"• الخسارة: {loss:.2f}%"
-                        )
-                        send_telegram_alert_special(msg)
-                        cur.execute(
-                            "UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s",
-                            (signal_id,)
-                        )
-                        conn.commit()
-                        logger.info(f"✅ [Track] تم إغلاق {symbol} بعد ضرب وقف الخسارة.")
+                            logger.info(f"✅ [Track] تم إغلاق {symbol} بناءً على إشارة بيع.")
+                    else:
+                        logger.info(f"ℹ️ [Track] {symbol} لم تصل نسبة الزيادة لـ 1% بعد.")
                 except Exception as e:
                     logger.error(f"❌ [Track] خطأ أثناء تتبع {symbol}: {e}")
                     conn.rollback()
         except Exception as e:
             logger.error(f"❌ [Track] خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
-
+        
 # ---------------------- تحليل السوق (توليد إشارات جديدة على فريم 4h مع حد 4 صفقات) ----------------------
 def analyze_market():
     logger.info("==========================================")
