@@ -201,6 +201,39 @@ def get_market_sentiment(symbol):
     """
     return 0.7
 
+# ---------------------- نموذج تنبؤ بالسعر باستخدام Gradient Boosting مع نافذة زمنية ----------------------
+from sklearn.ensemble import GradientBoostingRegressor
+
+def predict_future_price(symbol, interval='4h', days=7, window_size=5):
+    """
+    يعتمد النموذج على أسعار الإغلاق التاريخية باستخدام تقنية الانحدار المعزز.
+    يتم إنشاء ميزات من خلال نافذة زمنية (Sliding Window) للـ window_size الماضية.
+    """
+    try:
+        df = fetch_historical_data(symbol, interval, days)
+        if df is None or len(df) < window_size + 1:
+            logger.error(f"❌ [Price Prediction] بيانات غير كافية لتنبؤ السعر للزوج {symbol}.")
+            return None
+        # إعداد بيانات النموذج باستخدام نافذة زمنية من أسعار الإغلاق
+        close_prices = df['close'].values
+        X = []
+        y = []
+        for i in range(window_size, len(close_prices)):
+            X.append(close_prices[i-window_size:i])
+            y.append(close_prices[i])
+        X = np.array(X)
+        y = np.array(y)
+        model = GradientBoostingRegressor(n_estimators=100, max_depth=3)
+        model.fit(X, y)
+        # التنبؤ بالسعر التالي باستخدام آخر window_size سعر إغلاق
+        X_pred = np.array([close_prices[-window_size:]])
+        predicted_price = model.predict(X_pred)[0]
+        logger.info(f"✅ [Price Prediction] السعر المتوقع للزوج {symbol}: {predicted_price:.8f}")
+        return predicted_price
+    except Exception as e:
+        logger.error(f"❌ [Price Prediction] خطأ في تنبؤ السعر للزوج {symbol}: {e}")
+        return None
+
 # ---------------------- تعريف استراتيجية Freqtrade ----------------------
 class FreqtradeStrategy:
     stoploss = -0.02
@@ -268,6 +301,11 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
             },
             'trade_value': TRADE_VALUE
         }
+        # إضافة السعر المتوقع من النموذج الأكثر دقة
+        predicted_price = predict_future_price(symbol, interval='4h', days=7, window_size=5)
+        if predicted_price is not None:
+            signal['predicted_price'] = float(format(predicted_price, '.8f'))
+        
         logger.info(f"✅ [Signal] تم توليد إشارة من استراتيجية Freqtrade للزوج {symbol}:\n{signal}")
         return signal
     else:
@@ -373,17 +411,17 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
         loss = round((signal['stop_loss'] / signal['price'] - 1) * 100, 2)
         rtl_mark = "\u200F"
         message = (
-            f"{rtl_mark}🚨 **إشارة تداول جديدة - {signal['symbol']}**\n\n"
-            f"▫️ السعر الحالي: ${signal['price']}\n"
-            f"🎯 الهدف: ${signal['target']} (+{profit}%)\n"
-            f"🛑 وقف الخسارة: ${signal['stop_loss']} ({loss}%)\n"
-            f"⏱ الفريم المستخدم: {timeframe}\n"
-            f"💧 السيولة: {volume:,.2f} USDT\n"
-            f"💵 قيمة الصفقة: ${TRADE_VALUE}\n\n"
+            f"{rtl_mark}🚀 **إشارة تداول جديدة لزوج {signal['symbol']}**\n\n"
+            f"▫️ **السعر الحالي:** ${signal['price']}\n"
+            f"🎯 **الهدف:** ${signal['target']} (+{profit}%)\n"
+            f"🛑 **وقف الخسارة:** ${signal['stop_loss']} ({loss}%)\n"
+            f"⏱ **الفريم:** {timeframe}\n"
+            f"💧 **السيولة:** {volume:,.2f} USDT\n"
+            f"💵 **قيمة الصفقة:** ${TRADE_VALUE}\n\n"
             f"📈 **نسب السيطرة (4H):**\n"
-            f"   - BTC: {btc_dominance:.2f}%\n"
-            f"   - ETH: {eth_dominance:.2f}%\n"
-            f"⏰ {time.strftime('%Y-%m-%d %H:%M')}"
+            f"   - **BTC:** {btc_dominance:.2f}%\n"
+            f"   - **ETH:** {eth_dominance:.2f}%\n"
+            f"⏰ **{time.strftime('%Y-%m-%d %H:%M')}**"
         )
         reply_markup = {
             "inline_keyboard": [
@@ -625,6 +663,13 @@ def analyze_market():
                 logger.warning(f"⚠️ [Market] تجاهل {symbol} - بيانات 4h غير كافية.")
             if signal is None:
                 continue
+
+            # التأكد من عدم تكرار التوصيات لنفس الزوج
+            cur.execute("SELECT COUNT(*) FROM signals WHERE symbol = %s AND closed_at IS NULL", (signal['symbol'],))
+            if cur.fetchone()[0] > 0:
+                logger.info(f"⚠️ [Market] توجد توصية مفتوحة للزوج {signal['symbol']}، تخطي التوصية الجديدة.")
+                continue
+
             volume_15m = fetch_recent_volume(symbol)
             if volume_15m < 40000:
                 logger.info(f"⚠️ [Market] تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f} USDT.")
