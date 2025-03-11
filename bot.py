@@ -333,7 +333,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-36k1.onrender.com/webhook"
+    webhook_url = "https://hamza-2.onrender.com/webhook"
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
