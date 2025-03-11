@@ -14,6 +14,7 @@ import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 import ta  # تُستخدم لحساب المؤشرات الفنية مثل EMA, RSI, ATR
+from sklearn.ensemble import GradientBoostingRegressor
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -202,12 +203,11 @@ def get_market_sentiment(symbol):
     return 0.7
 
 # ---------------------- نموذج تنبؤ بالسعر باستخدام Gradient Boosting مع نافذة زمنية ----------------------
-from sklearn.ensemble import GradientBoostingRegressor
-
-def predict_future_price(symbol, interval='4h', days=7, window_size=5):
+def predict_future_price(symbol, interval='2h', days=30, window_size=5):
     """
     يعتمد النموذج على أسعار الإغلاق التاريخية باستخدام تقنية الانحدار المعزز.
     يتم إنشاء ميزات من خلال نافذة زمنية (Sliding Window) للـ window_size الماضية.
+    تم تعديل معلمات النموذج لتحسين دقته.
     """
     try:
         df = fetch_historical_data(symbol, interval, days)
@@ -223,7 +223,8 @@ def predict_future_price(symbol, interval='4h', days=7, window_size=5):
             y.append(close_prices[i])
         X = np.array(X)
         y = np.array(y)
-        model = GradientBoostingRegressor(n_estimators=100, max_depth=3)
+        # تحسين دقة النموذج عبر زيادة عدد الأشجار وتعميقها قليلاً
+        model = GradientBoostingRegressor(n_estimators=200, max_depth=4)
         model.fit(X, y)
         # التنبؤ بالسعر التالي باستخدام آخر window_size سعر إغلاق
         X_pred = np.array([close_prices[-window_size:]])
@@ -301,8 +302,8 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
             },
             'trade_value': TRADE_VALUE
         }
-        # إضافة السعر المتوقع من النموذج الأكثر دقة
-        predicted_price = predict_future_price(symbol, interval='4h', days=7, window_size=5)
+        # استخدام بيانات أوسع (فريم 2h لمدة 30 يوم) لتحسين دقة النموذج
+        predicted_price = predict_future_price(symbol, interval='2h', days=30, window_size=5)
         if predicted_price is not None:
             signal['predicted_price'] = float(format(predicted_price, '.8f'))
         
@@ -356,8 +357,8 @@ def get_crypto_symbols():
         logger.error(f"❌ [Data] خطأ في قراءة الملف: {e}")
         return []
 
-# استخدام فريم 4h لتوليد الإشارات مع بيانات 10 أيام
-def fetch_historical_data(symbol, interval='4h', days=10):
+# استخدام فريم 2h لتوليد الإشارات مع بيانات 10 أيام
+def fetch_historical_data(symbol, interval='2h', days=10):
     try:
         logger.info(f"⏳ [Data] بدء جلب البيانات التاريخية للزوج: {symbol} - الفريم {interval} لمدة {days} يوم/أيام.")
         klines = client.get_historical_klines(symbol, interval, f"{days} day ago UTC")
@@ -418,7 +419,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
             f"⏱ **الفريم:** {timeframe}\n"
             f"💧 **السيولة:** {volume:,.2f} USDT\n"
             f"💵 **قيمة الصفقة:** ${TRADE_VALUE}\n\n"
-            f"📈 **نسب السيطرة (4H):**\n"
+            f"📈 **نسب السيطرة (2h):**\n"
             f"   - **BTC:** {btc_dominance:.2f}%\n"
             f"   - **ETH:** {eth_dominance:.2f}%\n"
             f"⏰ **{time.strftime('%Y-%m-%d %H:%M')}**"
@@ -522,9 +523,9 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ [Report] فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات (متابعة التوصيات على فريم 1h) ----------------------
+# ---------------------- خدمة تتبع الإشارات (متابعة التوصيات على فريم 30m) ----------------------
 def track_signals():
-    logger.info("⏳ [Track] بدء خدمة تتبع الإشارات (فريم 1h)...")
+    logger.info("⏳ [Track] بدء خدمة تتبع الإشارات (فريم 30m)...")
     while True:
         try:
             check_db_connection()
@@ -551,8 +552,8 @@ def track_signals():
                         logger.error(f"❌ [Track] سعر الدخول للزوج {symbol} قريب من الصفر، تخطي الحساب.")
                         continue
 
-                    # جلب بيانات فريم 1h على مدى 3 أيام لضمان توفر بيانات كافية
-                    df = fetch_historical_data(symbol, interval='1h', days=3)
+                    # جلب بيانات فريم 30m على مدى 3 أيام لضمان توفر بيانات كافية
+                    df = fetch_historical_data(symbol, interval='30m', days=3)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ [Track] بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
@@ -568,9 +569,10 @@ def track_signals():
                     is_bearish = last_row['Bearish'] != 0
 
                     current_gain_pct = (current_price - entry) / entry
-                    if current_gain_pct >= 0.01:  # فقط إذا وصلت الزيادة إلى 1%
+                    # عند بلوغ السعر زيادة 1% يتم تحديث الهدف ووقف الخسارة
+                    if current_gain_pct >= 0.01:
                         if is_bullish and current_gain_pct >= last_update_pct + 0.01:
-                            # تحديث الهدف ووقف الخسارة عند إشارة شراء
+                            # تحديث الهدف ووقف الخسارة بناءً على مؤشرات إضافية
                             if ml_confidence >= 0.7 and sentiment >= 0.5:
                                 adjusted_multiplier = 1.8
                             else:
@@ -625,10 +627,10 @@ def track_signals():
             logger.error(f"❌ [Track] خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
         
-# ---------------------- تحليل السوق (توليد إشارات جديدة على فريم 4h مع حد 4 صفقات) ----------------------
+# ---------------------- تحليل السوق (توليد إشارات جديدة على فريم 2h مع حد 4 صفقات) ----------------------
 def analyze_market():
     logger.info("==========================================")
-    logger.info("⏳ [Market] بدء تحليل السوق (فريم 4h)...")
+    logger.info("⏳ [Market] بدء تحليل السوق (فريم 2h)...")
     try:
         check_db_connection()
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
@@ -649,18 +651,18 @@ def analyze_market():
 
         for symbol in symbols:
             logger.info("==========================================")
-            logger.info(f"⏳ [Market] بدء فحص الزوج: {symbol} (فريم 4h)")
+            logger.info(f"⏳ [Market] بدء فحص الزوج: {symbol} (فريم 2h)")
             signal = None
-            df_4h = fetch_historical_data(symbol, interval='4h', days=10)
-            if df_4h is not None and len(df_4h) >= 50:
-                signal_4h = generate_signal_using_freqtrade_strategy(df_4h, symbol)
-                if signal_4h:
-                    signal = signal_4h
-                    logger.info(f"✅ [Market] تم الحصول على إشارة شراء على فريم 4h للزوج {symbol}.")
+            df_2h = fetch_historical_data(symbol, interval='2h', days=10)
+            if df_2h is not None and len(df_2h) >= 50:
+                signal_2h = generate_signal_using_freqtrade_strategy(df_2h, symbol)
+                if signal_2h:
+                    signal = signal_2h
+                    logger.info(f"✅ [Market] تم الحصول على إشارة شراء على فريم 2h للزوج {symbol}.")
                 else:
-                    logger.info(f"⚠️ [Market] لم يتم الحصول على إشارة شراء على فريم 4h للزوج {symbol}.")
+                    logger.info(f"⚠️ [Market] لم يتم الحصول على إشارة شراء على فريم 2h للزوج {symbol}.")
             else:
-                logger.warning(f"⚠️ [Market] تجاهل {symbol} - بيانات 4h غير كافية.")
+                logger.warning(f"⚠️ [Market] تجاهل {symbol} - بيانات 2h غير كافية.")
             if signal is None:
                 continue
 
@@ -674,8 +676,8 @@ def analyze_market():
             if volume_15m < 40000:
                 logger.info(f"⚠️ [Market] تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f} USDT.")
                 continue
-            logger.info(f"✅ [Market] الشروط مستوفاة؛ إرسال تنبيه للزوج {symbol} (فريم 4h).")
-            send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance, "4h")
+            logger.info(f"✅ [Market] الشروط مستوفاة؛ إرسال تنبيه للزوج {symbol} (فريم 2h).")
+            send_telegram_alert(signal, volume_15m, btc_dominance, eth_dominance, "2h")
             try:
                 cur.execute("""
                     INSERT INTO signals 
