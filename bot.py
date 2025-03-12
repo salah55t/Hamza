@@ -13,7 +13,7 @@ import requests
 import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
-import ta  # تُستخدم لحساب المؤشرات الفنية مثل EMA, RSI, ATR
+import ta  # لحساب المؤشرات الفنية مثل EMA, RSI, ATR
 from sklearn.ensemble import GradientBoostingRegressor
 
 # ---------------------- إعدادات التسجيل ----------------------
@@ -63,11 +63,10 @@ def init_db():
                 achieved_target BOOLEAN DEFAULT FALSE,
                 hit_stop_loss BOOLEAN DEFAULT FALSE,
                 closed_at TIMESTAMP,
-                sent_at TIMESTAMP DEFAULT NOW()
+                sent_at TIMESTAMP DEFAULT NOW(),
+                last_update_pct DOUBLE PRECISION DEFAULT 0
             )
         """)
-        # إضافة العمود last_update_pct إذا لم يكن موجوداً
-        cur.execute("ALTER TABLE signals ADD COLUMN IF NOT EXISTS last_update_pct DOUBLE PRECISION DEFAULT 0;")
         conn.commit()
         logger.info("✅ [DB] تم تهيئة قاعدة البيانات بنجاح مع تحديث البنية.")
     except Exception as e:
@@ -142,7 +141,25 @@ def calculate_atr_indicator(df, period=14):
     logger.info(f"✅ [Indicator] تم حساب ATR: {df['atr'].iloc[-1]:.8f}")
     return df
 
-# ---------------------- دوال الكشف عن الأنماط الشمعية بدون TA-Lib ----------------------
+# دوال حساب MACD وKDJ
+def calculate_macd(df, fast_period=12, slow_period=26, signal_period=9):
+    df['ema_fast'] = df['close'].ewm(span=fast_period, adjust=False).mean()
+    df['ema_slow'] = df['close'].ewm(span=slow_period, adjust=False).mean()
+    df['macd'] = df['ema_fast'] - df['ema_slow']
+    df['macd_signal'] = df['macd'].ewm(span=signal_period, adjust=False).mean()
+    df['macd_hist'] = df['macd'] - df['macd_signal']
+    return df
+
+def calculate_kdj(df, period=14, k_period=3, d_period=3):
+    low_min = df['low'].rolling(window=period).min()
+    high_max = df['high'].rolling(window=period).max()
+    df['rsv'] = (df['close'] - low_min) / (high_max - low_min) * 100
+    df['kdj_k'] = df['rsv'].ewm(com=(k_period - 1), adjust=False).mean()
+    df['kdj_d'] = df['kdj_k'].ewm(com=(d_period - 1), adjust=False).mean()
+    df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
+    return df
+
+# ---------------------- دوال الكشف عن الأنماط الشمعية ----------------------
 def is_hammer(row):
     open_price = row['open']
     high = row['high']
@@ -179,7 +196,7 @@ def detect_candlestick_patterns(df):
     logger.info("✅ [Candles] تم تحليل الأنماط الشمعية باستخدام الدوال المخصصة.")
     return df
 
-# ---------------------- دوال التنبؤ وتحليل المشاعر (Placeholder) ----------------------
+# ---------------------- دوال التنبؤ وتحليل المشاعر ----------------------
 def ml_predict_signal(symbol, df):
     """
     دالة تنبؤية تجريبية تعتمد على مؤشر RSI.
@@ -202,11 +219,11 @@ def get_market_sentiment(symbol):
     """
     return 0.7
 
-# ---------------------- نموذج تنبؤ بالسعر باستخدام Gradient Boosting مع نافذة زمنية ----------------------
+# ---------------------- نموذج تنبؤ بالسعر باستخدام Gradient Boosting ----------------------
 def predict_future_price(symbol, interval='2h', days=30, window_size=5):
     """
     يعتمد النموذج على أسعار الإغلاق التاريخية باستخدام تقنية الانحدار المعزز.
-    يتم إنشاء ميزات من خلال نافذة زمنية (Sliding Window) للـ window_size الماضية.
+    يتم إنشاء ميزات من خلال نافذة زمنية للـ window_size الماضية.
     تم تعديل معلمات النموذج لتحسين دقته.
     """
     try:
@@ -214,7 +231,6 @@ def predict_future_price(symbol, interval='2h', days=30, window_size=5):
         if df is None or len(df) < window_size + 1:
             logger.error(f"❌ [Price Prediction] بيانات غير كافية لتنبؤ السعر للزوج {symbol}.")
             return None
-        # إعداد بيانات النموذج باستخدام نافذة زمنية من أسعار الإغلاق
         close_prices = df['close'].values
         X = []
         y = []
@@ -223,10 +239,8 @@ def predict_future_price(symbol, interval='2h', days=30, window_size=5):
             y.append(close_prices[i])
         X = np.array(X)
         y = np.array(y)
-        # تحسين دقة النموذج عبر زيادة عدد الأشجار وتعميقها قليلاً
         model = GradientBoostingRegressor(n_estimators=200, max_depth=4)
         model.fit(X, y)
-        # التنبؤ بالسعر التالي باستخدام آخر window_size سعر إغلاق
         X_pred = np.array([close_prices[-window_size:]])
         predicted_price = model.predict(X_pred)[0]
         logger.info(f"✅ [Price Prediction] السعر المتوقع للزوج {symbol}: {predicted_price:.8f}")
@@ -302,7 +316,6 @@ def generate_signal_using_freqtrade_strategy(df, symbol):
             },
             'trade_value': TRADE_VALUE
         }
-        # استخدام بيانات أوسع (فريم 2h لمدة 30 يوم) لتحسين دقة النموذج
         predicted_price = predict_future_price(symbol, interval='2h', days=30, window_size=5)
         if predicted_price is not None:
             signal['predicted_price'] = float(format(predicted_price, '.8f'))
@@ -523,7 +536,7 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ [Report] فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات (متابعة التوصيات على فريم 30m) ----------------------
+# ---------------------- خدمة تتبع الإشارات (فريم 30m) ----------------------
 def track_signals():
     logger.info("⏳ [Track] بدء خدمة تتبع الإشارات (فريم 30m)...")
     while True:
@@ -552,27 +565,48 @@ def track_signals():
                         logger.error(f"❌ [Track] سعر الدخول للزوج {symbol} قريب من الصفر، تخطي الحساب.")
                         continue
 
-                    # جلب بيانات فريم 30m على مدى 3 أيام لضمان توفر بيانات كافية
+                    # جلب بيانات الشموع بفريم 30m على مدى 3 أيام
                     df = fetch_historical_data(symbol, interval='30m', days=3)
                     if df is None or len(df) < 50:
                         logger.warning(f"⚠️ [Track] بيانات الشموع غير كافية للزوج {symbol}.")
                         continue
 
+                    # حساب المؤشرات الأساسية مع إضافة MACD وKDJ
                     strategy = FreqtradeStrategy()
                     df = strategy.populate_indicators(df)
                     df = detect_candlestick_patterns(df)
+                    df = calculate_macd(df)
+                    df = calculate_kdj(df)
                     last_row = df.iloc[-1]
 
                     ml_confidence = ml_predict_signal(symbol, df)
                     sentiment = get_market_sentiment(symbol)
-                    is_bullish = last_row['Bullish'] != 0
-                    is_bearish = last_row['Bearish'] != 0
+
+                    # استنتاج إشارات MACD وKDJ
+                    macd_bullish = df['macd'].iloc[-1] > df['macd_signal'].iloc[-1]
+                    macd_bearish = df['macd'].iloc[-1] < df['macd_signal'].iloc[-1]
+                    kdj_bullish = (df['kdj_j'].iloc[-1] > 50) and (df['kdj_k'].iloc[-1] > df['kdj_d'].iloc[-1])
+                    kdj_bearish = (df['kdj_j'].iloc[-1] < 50) and (df['kdj_k'].iloc[-1] < df['kdj_d'].iloc[-1])
+                    # دمج الإشارات من أنماط الشموع ومؤشرات MACD وKDJ
+                    bullish_signal = (last_row['Bullish'] != 0) or (macd_bullish and kdj_bullish)
+                    bearish_signal = (last_row['Bearish'] != 0) or (macd_bearish and kdj_bearish)
 
                     current_gain_pct = (current_price - entry) / entry
-                    # عند بلوغ السعر زيادة 1% يتم تحديث الهدف ووقف الخسارة
+
+                    # شرط غلق التوصية عند بلوغ السعر وقف الخسارة
+                    if current_price <= target * 0 or current_price <= stop_loss:
+                        msg = (f"⚠️ [Track] تم الوصول إلى وقف الخسارة للزوج {symbol} عند السعر {current_price:.8f}. "
+                               f"إغلاق التوصية.")
+                        send_telegram_alert_special(msg)
+                        cur.execute("UPDATE signals SET hit_stop_loss = TRUE, closed_at = NOW() WHERE id = %s", (signal_id,))
+                        conn.commit()
+                        logger.info(f"✅ [Track] تم إغلاق {symbol} عند وقف الخسارة.")
+                        continue
+
+                    # عند بلوغ السعر زيادة 1% عن الدخول يتم اتخاذ القرار:
                     if current_gain_pct >= 0.01:
-                        if is_bullish and current_gain_pct >= last_update_pct + 0.01:
-                            # تحديث الهدف ووقف الخسارة بناءً على مؤشرات إضافية
+                        if bullish_signal and current_gain_pct >= last_update_pct + 0.01:
+                            # تحديث الهدف ووقف الخسارة عند إشارة شراء
                             if ml_confidence >= 0.7 and sentiment >= 0.5:
                                 adjusted_multiplier = 1.8
                             else:
@@ -602,8 +636,8 @@ def track_signals():
                                 )
                                 conn.commit()
                                 logger.info(f"✅ [Track] تم تحديث {symbol} بنجاح.")
-                        elif is_bearish:
-                            # إغلاق التوصية عند إشارة بيع (مع تحقيق ربح 1%)
+                        elif bearish_signal:
+                            # إغلاق التوصية عند إشارة بيع (بعد بلوغ 1% من الدخول)
                             profit = ((current_price - entry) / entry) * 100
                             msg = (
                                 f"⚠️ [Track] إشارة بيع (هبوط) للزوج {symbol}:\n"
@@ -627,7 +661,7 @@ def track_signals():
             logger.error(f"❌ [Track] خطأ في خدمة تتبع الإشارات: {e}")
         time.sleep(60)
         
-# ---------------------- تحليل السوق (توليد إشارات جديدة على فريم 2h مع حد 4 صفقات) ----------------------
+# ---------------------- تحليل السوق (فريم 2h مع حد 4 صفقات) ----------------------
 def analyze_market():
     logger.info("==========================================")
     logger.info("⏳ [Market] بدء تحليل السوق (فريم 2h)...")
