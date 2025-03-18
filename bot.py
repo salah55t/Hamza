@@ -151,42 +151,49 @@ def get_fear_greed_index():
 # ---------------------- منطق استراتيجية Hummingbot المحسنة ----------------------
 def generate_signal_using_hummingbot_strategy(df, symbol):
     """
-    تحسين استراتيجية Hummingbot:
-    - استخدام بيانات آخر 20 شمعة لحساب المتوسط والانحراف المعياري.
-    - حساب الحد الأدنى (Lower Band) كمتوسط السعر ناقص ضعف الانحراف المعياري.
-    - إذا كان السعر الحالي أقل من هذا الحد، يتم اعتبارها إشارة شراء.
-    - يتم تحديد الهدف عند متوسط السعر (توقع عودة السعر إلى مستواه الطبيعي)
-      ووقف الخسارة بناءً على نصف المسافة بين سعر الدخول والحد الأدنى.
+    تحسين استراتيجية Hummingbot باستخدام مستويات الدعم والمقاومة ومستويات فيبوناتشي:
+    - نستخدم بيانات آخر 50 شمعة لحساب أقل سعر (L) وأعلى سعر (H).
+    - نحدد مستوى فيبوناتشي عند 38.2% كنقطة مرجعية (fib_38 = L + 0.382*(H-L)).
+    - إذا كان السعر الحالي أقل من fib_38 (أي في منطقة تصحيح قوية)،
+      يتم اعتبارها إشارة شراء.
+    - يتم تعيين الهدف عند أعلى سعر (H) خلال الفترة،
+      ووقف الخسارة عند مستوى قريب من الدعم (مثلاً أقل بنسبة 0.5% من L).
     """
     df = df.dropna().reset_index(drop=True)
-    if len(df) < 20:
+    window = 50
+    if len(df) < window:
         logger.warning(f"⚠️ [Hummingbot] بيانات غير كافية للزوج {symbol}.")
         return None
 
     current_price = df['close'].iloc[-1]
-    window = 20
-    recent_prices = df['close'].tail(window)
-    mean_price = recent_prices.mean()
-    std_price = recent_prices.std()
-    lower_band = mean_price - 2 * std_price
+    recent_window = df['close'].tail(window)
+    L = recent_window.min()
+    H = recent_window.max()
+    
+    if H - L < 1e-8:
+        logger.warning(f"⚠️ [Hummingbot] تغير السعر ضئيل جداً للزوج {symbol}.")
+        return None
 
-    if current_price < lower_band:
+    fib_38 = L + 0.382 * (H - L)
+    
+    # شرط التوليد: إذا كان السعر الحالي أقل من مستوى 38.2%
+    if current_price <= fib_38:
         entry_price = current_price
-        target = mean_price  # توقع عودة السعر إلى متوسطه
-        # وقف الخسارة يتم تحديده كنصف المسافة بين سعر الدخول والحد الأدنى
-        stop_loss = entry_price - 0.5 * (entry_price - lower_band)
+        target = H  # الهدف عند أعلى سعر خلال الفترة (مستوى مقاومة)
+        # وقف الخسارة يُحدد عند نسبة بسيطة أقل من أقل سعر (الدعم)
+        stop_loss = L * 0.995  
         signal = {
             'symbol': symbol,
             'price': float(format(entry_price, '.8f')),
             'target': float(format(target, '.8f')),
             'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'hummingbot_market_making_improved',
+            'strategy': 'hummingbot_fib_analysis',
             'trade_value': TRADE_VALUE
         }
-        logger.info(f"✅ [Hummingbot] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة:\n{signal}")
+        logger.info(f"✅ [Hummingbot] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة (فيبوناتشي):\n{signal}")
         return signal
     else:
-        logger.info(f"ℹ️ [Hummingbot] لم يتم توليد إشارة للزوج {symbol}، السعر الحالي {current_price:.8f} لا يقل عن الحد الأدنى (lower_band = {lower_band:.8f}).")
+        logger.info(f"ℹ️ [Hummingbot] لم يتم توليد إشارة للزوج {symbol}، السعر الحالي {current_price:.8f} أعلى من مستوى فيبوناتشي (fib_38 = {fib_38:.8f}).")
         return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -567,7 +574,7 @@ def analyze_market():
             signal = None
             # استخدام فريم 1 ساعة مع بيانات 4 أيام
             df_1h = fetch_historical_data(symbol, interval='1h', days=4)
-            if df_1h is not None and len(df_1h) >= 20:
+            if df_1h is not None and len(df_1h) >= 50:
                 signal = generate_signal_using_hummingbot_strategy(df_1h, symbol)
                 if signal:
                     logger.info(f"✅ [Market] تم الحصول على إشارة شراء على فريم 1h للزوج {symbol}.")
