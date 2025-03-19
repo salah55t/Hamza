@@ -13,6 +13,7 @@ import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
+import talib  # مكتبة التحليل الفني لحساب RSI وغيرها من المؤشرات
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -120,7 +121,7 @@ def run_ticker_socket_manager():
     except Exception as e:
         logger.error(f"❌ [WS] خطأ في تشغيل WebSocket: {e}")
 
-# ---------------------- دوال التنبؤ والتحليل (يمكن الإبقاء عليها إذا كانت مستخدمة في وظائف أخرى) ----------------------
+# ---------------------- دوال التنبؤ والتحليل ----------------------
 def get_market_sentiment(symbol):
     return 0.7
 
@@ -148,60 +149,72 @@ def get_fear_greed_index():
         logger.error(f"❌ [FNG] خطأ في جلب مؤشر الخوف والجشع: {e}")
         return 50.0, "غير محدد"
 
-# ---------------------- منطق استراتيجية Hummingbot المحسنة مع تعديل وقف الخسارة ----------------------
-def generate_signal_using_hummingbot_strategy(df, symbol):
+# ---------------------- استراتيجية Hummingbot المحسنة باستخدام RSI مع فيبوناتشي والمرشحات الاتجاهية وحجم التداول ----------------------
+def generate_signal_with_rsi_fib(df, symbol):
     """
-    تحسين استراتيجية Hummingbot باستخدام مستويات الدعم والمقاومة ومستويات فيبوناتشي:
-    - نستخدم بيانات آخر 50 شمعة لحساب أقل سعر (L) وأعلى سعر (H).
-    - نحدد مستوى فيبوناتشي عند 38.2% كنقطة مرجعية (fib_38 = L + 0.382*(H-L)).
-    - إذا كان السعر الحالي أقل من fib_38 (أي في منطقة تصحيح قوية)،
-      يتم اعتبارها إشارة شراء.
-    - يتم تعيين الهدف عند أعلى سعر (H) خلال الفترة.
-    - يتم حساب وقف الخسارة الأولي وفق الصيغة القديمة، ثم يُضاف هامش أمان (مثلاً 1% من سعر الدخول)
-      في حال كانت المسافة بين سعر الدخول ووقف الخسارة ضئيلة.
+    تحسين الاستراتيجية بإضافة:
+    - حساب مستوى فيبوناتشي (38.2%) لتحديد منطقة التصحيح.
+    - حساب متوسط متحرك (SMA50) لتأكيد الاتجاه الصعودي.
+    - حساب مؤشر القوة النسبية (RSI) لفترة 14 شمعة لتحديد حالة إفراط البيع.
+    - تحليل حجم التداول بمقارنة حجم الشمعة الأخيرة بمتوسط حجم آخر 50 شمعة.
+    في حال تحقق الشروط (السعر عند فيبوناتشي مع RSI في منطقة إفراط البيع، السعر فوق SMA50 وحجم التداول التصاعدي)،
+    يتم توليد إشارة شراء.
     """
     df = df.dropna().reset_index(drop=True)
     window = 50
     if len(df) < window:
-        logger.warning(f"⚠️ [Hummingbot] بيانات غير كافية للزوج {symbol}.")
+        logger.warning(f"⚠️ [RSI_Fib] بيانات غير كافية للزوج {symbol}.")
         return None
 
     current_price = df['close'].iloc[-1]
-    recent_window = df['close'].tail(window)
-    L = recent_window.min()
-    H = recent_window.max()
+    recent_window = df.tail(window)
+    L = recent_window['close'].min()
+    H = recent_window['close'].max()
     
     if H - L < 1e-8:
-        logger.warning(f"⚠️ [Hummingbot] تغير السعر ضئيل جداً للزوج {symbol}.")
+        logger.warning(f"⚠️ [RSI_Fib] تغير السعر ضئيل جداً للزوج {symbol}.")
         return None
 
     fib_38 = L + 0.382 * (H - L)
     
-    # شرط توليد الإشارة: إذا كان السعر الحالي أقل من مستوى فيبوناتشي
-    if current_price <= fib_38:
+    # حساب المتوسط المتحرك لفترة 50 شمعة لتأكيد الاتجاه
+    df['SMA50'] = df['close'].rolling(window=50).mean()
+    current_sma = df['SMA50'].iloc[-1]
+    
+    # حساب مؤشر القوة النسبية (RSI) لفترة 14 شمعة
+    df['RSI'] = talib.RSI(df['close'].values, timeperiod=14)
+    current_rsi = df['RSI'].iloc[-1]
+    
+    # تحليل حجم التداول: حساب متوسط حجم التداول للشموع الأخيرة ومقارنته بالشمعة الحالية
+    avg_volume = recent_window['volume'].mean()
+    current_volume = df['volume'].iloc[-1]
+    
+    logger.info(f"⚙️ [RSI_Fib] {symbol} => السعر الحالي: {current_price:.8f}, fib_38: {fib_38:.8f}, SMA50: {current_sma:.8f}, RSI: {current_rsi:.2f}, حجم الشمعة: {current_volume:.2f}, متوسط الحجم: {avg_volume:.2f}")
+    
+    # شرط توليد الإشارة:
+    # 1. السعر عند أو أقل من مستوى فيبوناتشي.
+    # 2. مؤشر RSI في منطقة إفراط البيع (< 30).
+    # 3. السعر أعلى من المتوسط المتحرك (تأكيد الاتجاه الصعودي).
+    # 4. حجم الشمعة الحالية أكبر من أو يساوي المتوسط (دلالة على تصاعد الحجم).
+    if current_price <= fib_38 and current_rsi < 30 and current_price > current_sma and current_volume >= avg_volume:
         entry_price = current_price
-        target = H  # الهدف عند أعلى سعر خلال الفترة (مستوى مقاومة)
-        # حساب وقف الخسارة الأولي وفق الصيغة القديمة
+        target = H  # الهدف عند أعلى سعر خلال الفترة
+        # حساب وقف الخسارة الأولي وفق الصيغة القديمة مع هامش أمان
         raw_stop_loss = L * 0.995  
-        # تحديد هامش أمان أدنى كـ 1% من سعر الدخول
         min_buffer = 0.01 * entry_price  
-        # إذا كانت المسافة بين سعر الدخول وraw_stop_loss أقل من الهامش، يتم استخدام الهامش كوقف خسارة
-        if (entry_price - raw_stop_loss) < min_buffer:
-            stop_loss = entry_price - min_buffer
-        else:
-            stop_loss = raw_stop_loss
+        stop_loss = entry_price - min_buffer if (entry_price - raw_stop_loss) < min_buffer else raw_stop_loss
         signal = {
             'symbol': symbol,
             'price': float(format(entry_price, '.8f')),
             'target': float(format(target, '.8f')),
             'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'hummingbot_fib_analysis',
+            'strategy': 'hummingbot_rsi_fib',
             'trade_value': TRADE_VALUE
         }
-        logger.info(f"✅ [Hummingbot] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة (فيبوناتشي):\n{signal}")
+        logger.info(f"✅ [RSI_Fib] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة:\n{signal}")
         return signal
     else:
-        logger.info(f"ℹ️ [Hummingbot] لم يتم توليد إشارة للزوج {symbol}، السعر الحالي {current_price:.8f} أعلى من مستوى فيبوناتشي (fib_38 = {fib_38:.8f}).")
+        logger.info(f"ℹ️ [RSI_Fib] لم تتحقق شروط الإشارة للزوج {symbol} (السعر: {current_price:.8f}, RSI: {current_rsi:.2f}, SMA50: {current_sma:.8f}).")
         return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -261,8 +274,9 @@ def fetch_historical_data(symbol, interval='2h', days=10):
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
+        df['volume'] = df['volume'].astype(float)
         logger.info(f"✅ [Data] تم جلب {len(df)} صف من البيانات للزوج: {symbol}.")
-        return df[['timestamp', 'open', 'high', 'low', 'close']]
+        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         logger.error(f"❌ [Data] خطأ في جلب البيانات لـ {symbol}: {e}")
         return None
@@ -325,7 +339,8 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
             f"   • ETH: {eth_dominance:.2f}%\n"
             f"📊 **مؤشر الخوف والجشع:** {fng_value:.2f} - {fng_label}\n"
             f"——————————————\n"
-            f"⏰ **{timestamp}**"
+            f"⏰ **{timestamp}**\n\n"
+            f"نشر بواسطة str2hamza"
         )
         reply_markup = {
             "inline_keyboard": [
@@ -351,7 +366,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
 def send_telegram_alert_special(message):
     try:
         ltr_mark = "\u200E"
-        full_message = f"{ltr_mark}{message}"
+        full_message = f"{ltr_mark}{message}\n\nنشر بواسطة str2hamza"
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "عرض التقرير", "callback_data": "get_report"}]
@@ -583,7 +598,7 @@ def analyze_market():
             # استخدام فريم 1 ساعة مع بيانات 4 أيام
             df_1h = fetch_historical_data(symbol, interval='1h', days=4)
             if df_1h is not None and len(df_1h) >= 50:
-                signal = generate_signal_using_hummingbot_strategy(df_1h, symbol)
+                signal = generate_signal_with_rsi_fib(df_1h, symbol)
                 if signal:
                     logger.info(f"✅ [Market] تم الحصول على إشارة شراء على فريم 1h للزوج {symbol}.")
                 else:
