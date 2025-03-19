@@ -1,3 +1,10 @@
+"""
+تم استبدال مكتبة TA-Lib بدالة compute_rsi الخاصة بحساب مؤشر القوة النسبية (RSI)
+لحساب RSI نستخدم المعادلة:
+    RSI = 100 - (100 / (1 + RS))
+حيث RS = متوسط المكاسب / متوسط الخسائر
+"""
+
 import time
 import os
 import pandas as pd
@@ -13,7 +20,20 @@ import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-import talib  # مكتبة التحليل الفني لحساب RSI وغيرها من المؤشرات
+
+# ---------------------- دالة حساب RSI ----------------------
+def compute_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    # حساب المتوسط باستخدام طريقة الحركة الأسية أو المتوسط البسيط
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    # لتجنب القسمة على صفر
+    avg_loss.replace(0, 1e-10, inplace=True)
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
@@ -181,8 +201,8 @@ def generate_signal_with_rsi_fib(df, symbol):
     df['SMA50'] = df['close'].rolling(window=50).mean()
     current_sma = df['SMA50'].iloc[-1]
     
-    # حساب مؤشر القوة النسبية (RSI) لفترة 14 شمعة
-    df['RSI'] = talib.RSI(df['close'].values, timeperiod=14)
+    # حساب مؤشر القوة النسبية (RSI) باستخدام الدالة المخصصة compute_rsi
+    df['RSI'] = compute_rsi(df['close'], period=14)
     current_rsi = df['RSI'].iloc[-1]
     
     # تحليل حجم التداول: حساب متوسط حجم التداول للشموع الأخيرة ومقارنته بالشمعة الحالية
