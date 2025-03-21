@@ -14,20 +14,6 @@ from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
 
-# ---------------------- دالة حساب RSI ----------------------
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    # حساب المتوسط باستخدام طريقة الحركة الأسية أو المتوسط البسيط
-    avg_gain = gain.rolling(window=period, min_periods=period).mean()
-    avg_loss = loss.rolling(window=period, min_periods=period).mean()
-    # لتجنب القسمة على صفر
-    avg_loss.replace(0, 1e-10, inplace=True)
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -162,72 +148,52 @@ def get_fear_greed_index():
         logger.error(f"❌ [FNG] خطأ في جلب مؤشر الخوف والجشع: {e}")
         return 50.0, "غير محدد"
 
-# ---------------------- استراتيجية Hummingbot المحسنة باستخدام RSI مع فيبوناتشي والمرشحات الاتجاهية وحجم التداول ----------------------
-def generate_signal_with_rsi_fib(df, symbol):
+# ---------------------- استراتيجية Hummingbot المحسنة ----------------------
+def generate_signal_using_hummingbot_strategy(df, symbol):
     """
-    تحسين الاستراتيجية بإضافة:
-    - حساب مستوى فيبوناتشي (38.2%) لتحديد منطقة التصحيح.
-    - حساب متوسط متحرك (SMA50) لتأكيد الاتجاه الصعودي.
-    - حساب مؤشر القوة النسبية (RSI) لفترة 14 شمعة لتحديد حالة إفراط البيع.
-    - تحليل حجم التداول بمقارنة حجم الشمعة الأخيرة بمتوسط حجم آخر 50 شمعة.
-    في حال تحقق الشروط (السعر عند فيبوناتشي مع RSI في منطقة إفراط البيع، السعر فوق SMA50 وحجم التداول التصاعدي)،
-    يتم توليد إشارة شراء.
+    استخدام بيانات آخر 50 شمعة لحساب أقل سعر (L) وأعلى سعر (H)،
+    وتحديد مستوى فيبوناتشي عند 38.2% (fib_38). في حال كان السعر الحالي أقل من fib_38،
+    يتم توليد إشارة شراء مع تحديد الهدف عند H ووقف الخسارة بناءً على L.
     """
     df = df.dropna().reset_index(drop=True)
     window = 50
     if len(df) < window:
-        logger.warning(f"⚠️ [RSI_Fib] بيانات غير كافية للزوج {symbol}.")
+        logger.warning(f"⚠️ [Hummingbot] بيانات غير كافية للزوج {symbol}.")
         return None
 
     current_price = df['close'].iloc[-1]
-    recent_window = df.tail(window)
-    L = recent_window['close'].min()
-    H = recent_window['close'].max()
+    recent_window = df['close'].tail(window)
+    L = recent_window.min()
+    H = recent_window.max()
     
     if H - L < 1e-8:
-        logger.warning(f"⚠️ [RSI_Fib] تغير السعر ضئيل جداً للزوج {symbol}.")
+        logger.warning(f"⚠️ [Hummingbot] تغير السعر ضئيل جداً للزوج {symbol}.")
         return None
 
     fib_38 = L + 0.382 * (H - L)
     
-    # حساب المتوسط المتحرك لفترة 50 شمعة لتأكيد الاتجاه
-    df['SMA50'] = df['close'].rolling(window=50).mean()
-    current_sma = df['SMA50'].iloc[-1]
-    
-    # حساب مؤشر القوة النسبية (RSI) باستخدام الدالة المخصصة compute_rsi
-    df['RSI'] = compute_rsi(df['close'], period=14)
-    current_rsi = df['RSI'].iloc[-1]
-    
-    # تحليل حجم التداول: حساب متوسط حجم التداول للشموع الأخيرة ومقارنته بالشمعة الحالية
-    avg_volume = recent_window['volume'].mean()
-    current_volume = df['volume'].iloc[-1]
-    
-    logger.info(f"⚙️ [RSI_Fib] {symbol} => السعر الحالي: {current_price:.8f}, fib_38: {fib_38:.8f}, SMA50: {current_sma:.8f}, RSI: {current_rsi:.2f}, حجم الشمعة: {current_volume:.2f}, متوسط الحجم: {avg_volume:.2f}")
-    
-    # شرط توليد الإشارة:
-    # 1. السعر عند أو أقل من مستوى فيبوناتشي.
-    # 2. مؤشر RSI في منطقة إفراط البيع (< 30).
-    # 3. السعر أعلى من المتوسط المتحرك (تأكيد الاتجاه الصعودي).
-    # 4. حجم الشمعة الحالية أكبر من أو يساوي المتوسط (دلالة على تصاعد الحجم).
-    if current_price <= fib_38 and current_rsi < 30 and current_price > current_sma and current_volume >= avg_volume:
+    # شرط توليد الإشارة: إذا كان السعر الحالي أقل من مستوى فيبوناتشي
+    if current_price <= fib_38:
         entry_price = current_price
         target = H  # الهدف عند أعلى سعر خلال الفترة
-        # حساب وقف الخسارة الأولي وفق الصيغة القديمة مع هامش أمان
         raw_stop_loss = L * 0.995  
         min_buffer = 0.01 * entry_price  
-        stop_loss = entry_price - min_buffer if (entry_price - raw_stop_loss) < min_buffer else raw_stop_loss
+        if (entry_price - raw_stop_loss) < min_buffer:
+            stop_loss = entry_price - min_buffer
+        else:
+            stop_loss = raw_stop_loss
         signal = {
             'symbol': symbol,
             'price': float(format(entry_price, '.8f')),
             'target': float(format(target, '.8f')),
             'stop_loss': float(format(stop_loss, '.8f')),
-            'strategy': 'hummingbot_rsi_fib',
+            'strategy': 'hummingbot_fib_analysis',
             'trade_value': TRADE_VALUE
         }
-        logger.info(f"✅ [RSI_Fib] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة:\n{signal}")
+        logger.info(f"✅ [Hummingbot] تم توليد إشارة للزوج {symbol} باستخدام الاستراتيجية المحسنة (فيبوناتشي):\n{signal}")
         return signal
     else:
-        logger.info(f"ℹ️ [RSI_Fib] لم تتحقق شروط الإشارة للزوج {symbol} (السعر: {current_price:.8f}, RSI: {current_rsi:.2f}, SMA50: {current_sma:.8f}).")
+        logger.info(f"ℹ️ [Hummingbot] لم يتم توليد إشارة للزوج {symbol}، السعر الحالي {current_price:.8f} أعلى من مستوى فيبوناتشي (fib_38 = {fib_38:.8f}).")
         return None
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -251,7 +217,7 @@ def webhook():
     return '', 200
 
 def set_telegram_webhook():
-    webhook_url = "https://hamza-2.onrender.com/webhook"  # تأكد من تحديث الرابط حسب النشر
+    webhook_url = "https://hamza-l8i9.onrender.com/webhook"  # تأكد من تحديث الرابط حسب النشر
     url = f"https://api.telegram.org/bot{telegram_token}/setWebhook?url={webhook_url}"
     try:
         response = requests.get(url, timeout=10)
@@ -287,9 +253,8 @@ def fetch_historical_data(symbol, interval='2h', days=10):
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
         logger.info(f"✅ [Data] تم جلب {len(df)} صف من البيانات للزوج: {symbol}.")
-        return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
+        return df[['timestamp', 'open', 'high', 'low', 'close']]
     except Exception as e:
         logger.error(f"❌ [Data] خطأ في جلب البيانات لـ {symbol}: {e}")
         return None
@@ -352,8 +317,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
             f"   • ETH: {eth_dominance:.2f}%\n"
             f"📊 **مؤشر الخوف والجشع:** {fng_value:.2f} - {fng_label}\n"
             f"——————————————\n"
-            f"⏰ **{timestamp}**\n\n"
-            f"نشر بواسطة str2hamza"
+            f"⏰ **{timestamp}**"
         )
         reply_markup = {
             "inline_keyboard": [
@@ -379,7 +343,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
 def send_telegram_alert_special(message):
     try:
         ltr_mark = "\u200E"
-        full_message = f"{ltr_mark}{message}\n\nنشر بواسطة str2hamza"
+        full_message = f"{ltr_mark}{message}"
         reply_markup = {
             "inline_keyboard": [
                 [{"text": "عرض التقرير", "callback_data": "get_report"}]
@@ -454,7 +418,17 @@ def send_report(target_chat_id):
     except Exception as e:
         logger.error(f"❌ [Report] فشل إرسال تقرير الأداء: {e}")
 
-# ---------------------- خدمة تتبع الإشارات (فحص التوصيات المفتوحة) ----------------------
+# ---------------------- دالة إغلاق الإشارات القديمة ----------------------
+def auto_close_old_signals():
+    try:
+        check_db_connection()
+        cur.execute("UPDATE signals SET closed_at = NOW(), profit_percentage = 0 WHERE closed_at IS NULL AND sent_at < NOW() - INTERVAL '1 day'")
+        conn.commit()
+        logger.info("✅ [AutoClose] تم إغلاق الإشارات القديمة التي تجاوزت يوم واحد.")
+    except Exception as e:
+        logger.error(f"❌ [AutoClose] فشل في إغلاق الإشارات القديمة: {e}")
+
+# ---------------------- خدمة تتبع الإشارات ----------------------
 def track_signals():
     logger.info("⏳ [Track] بدء خدمة تتبع الإشارات (فريم 15m مع بيانات يومين)...")
     while True:
@@ -473,27 +447,20 @@ def track_signals():
             for signal in active_signals:
                 signal_id, symbol, entry, target, stop_loss = signal
                 try:
-                    if symbol in ticker_data:
-                        current_price = float(ticker_data[symbol].get('c', 0))
-                    else:
+                    if symbol not in ticker_data:
                         logger.warning(f"⚠️ [Track] لا يوجد تحديث أسعار للزوج {symbol} من WebSocket.")
                         continue
+                    current_price = float(ticker_data[symbol].get('c', 0))
                     logger.info(f"⏳ [Track] {symbol}: السعر الحالي {current_price}, الدخول {entry}")
                     if abs(entry) < 1e-8:
                         logger.error(f"❌ [Track] سعر الدخول للزوج {symbol} قريب من الصفر، تخطي الحساب.")
                         continue
 
-                    df = fetch_historical_data(symbol, interval='15m', days=2)
-                    if df is None or len(df) < 10:
-                        logger.warning(f"⚠️ [Track] بيانات الشموع غير كافية للزوج {symbol}.")
-                        continue
-
-                    current_gain_pct = (current_price - entry) / entry
-
+                    # التحقق من بلوغ الهدف
                     if current_price >= target:
                         profit_pct = target / entry - 1
-                        profit_usdt = TRADE_VALUE * profit_pct
                         profit_pct_display = round(profit_pct * 100, 2)
+                        profit_usdt = TRADE_VALUE * profit_pct
                         msg = f"✅ [Track] توصية {symbol} حققت الهدف عند {current_price:.8f} بربح {profit_pct_display}% ({round(profit_usdt,2)} USDT)"
                         send_telegram_alert_special(msg)
                         cur.execute("""
@@ -505,10 +472,11 @@ def track_signals():
                         logger.info(f"✅ [Track] تم إغلاق توصية {symbol} عند تحقيق الهدف.")
                         continue
 
-                    elif current_price <= stop_loss:
+                    # التحقق من بلوغ وقف الخسارة
+                    if current_price <= stop_loss:
                         loss_pct = stop_loss / entry - 1
-                        loss_usdt = TRADE_VALUE * loss_pct
                         loss_pct_display = round(loss_pct * 100, 2)
+                        loss_usdt = TRADE_VALUE * loss_pct
                         profitable_stop_loss = current_price > entry
                         stop_type = "وقف خسارة رابح" if profitable_stop_loss else "وقف خسارة"
                         msg = f"⚠️ [Track] توصية {symbol} أغلقت عند {current_price:.8f} ({stop_type}) بخسارة {loss_pct_display}% ({round(loss_usdt,2)} USDT)"
@@ -523,30 +491,24 @@ def track_signals():
                         continue
 
                     # تحديث الهدف والوقف بناءً على التحرك الإيجابي (Trailing Stop)
+                    current_gain_pct = (current_price - entry) / entry
                     if current_gain_pct >= 0.01:
                         n = int(current_gain_pct * 100)
                         new_target = entry * (1 + (n + 1) / 100)
                         new_stop_loss = entry if n == 1 else entry * (1 + (n - 1) / 100)
-                        update_flag = False
-                        if new_target > target:
-                            target = new_target
-                            update_flag = True
-                        if new_stop_loss > stop_loss:
-                            stop_loss = new_stop_loss
-                            update_flag = True
-                        if update_flag:
+                        if new_target > target or new_stop_loss > stop_loss:
                             msg = (
                                 f"🔄 [Track] تحديث توصية {symbol}:\n"
                                 f"▫️ سعر الدخول: ${entry:.8f}\n"
                                 f"▫️ السعر الحالي: ${current_price:.8f}\n"
                                 f"▫️ نسبة الزيادة: {current_gain_pct*100:.2f}%\n"
-                                f"▫️ الهدف الجديد: ${target:.8f}\n"
-                                f"▫️ وقف الخسارة الجديد: ${stop_loss:.8f}"
+                                f"▫️ الهدف الجديد: ${new_target:.8f}\n"
+                                f"▫️ وقف الخسارة الجديد: ${new_stop_loss:.8f}"
                             )
                             send_telegram_alert_special(msg)
                             cur.execute(
                                 "UPDATE signals SET target = %s, stop_loss = %s WHERE id = %s",
-                                (target, stop_loss, signal_id)
+                                (new_target, new_stop_loss, signal_id)
                             )
                             conn.commit()
                             logger.info(f"✅ [Track] تم تحديث توصية {symbol} بنجاح.")
@@ -577,11 +539,15 @@ def check_open_recommendations():
             logger.error(f"❌ [Open Check] خطأ أثناء التحقق من التوصيات المفتوحة: {e}")
         time.sleep(60)
 
-# ---------------------- تحليل السوق (فريم 1h) باستخدام استراتيجية Hummingbot المحسنة ----------------------
+# ---------------------- تحليل السوق باستخدام استراتيجية Hummingbot ----------------------
 def analyze_market():
     global allow_new_recommendations
     logger.info("==========================================")
     logger.info("⏳ [Market] بدء تحليل السوق (فريم 1h مع بيانات 4 أيام)...")
+    
+    # إغلاق الإشارات القديمة لتفادي تراكمها
+    auto_close_old_signals()
+    
     try:
         check_db_connection()
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
@@ -611,7 +577,7 @@ def analyze_market():
             # استخدام فريم 1 ساعة مع بيانات 4 أيام
             df_1h = fetch_historical_data(symbol, interval='1h', days=4)
             if df_1h is not None and len(df_1h) >= 50:
-                signal = generate_signal_with_rsi_fib(df_1h, symbol)
+                signal = generate_signal_using_hummingbot_strategy(df_1h, symbol)
                 if signal:
                     logger.info(f"✅ [Market] تم الحصول على إشارة شراء على فريم 1h للزوج {symbol}.")
                 else:
@@ -627,6 +593,7 @@ def analyze_market():
                 continue
 
             volume_15m = fetch_recent_volume(symbol)
+            # يمكن تعديل شرط السيولة هنا إذا كان مرتفعاً جداً
             if volume_15m < 500000:
                 logger.info(f"⚠️ [Market] تجاهل {symbol} - سيولة منخفضة: {volume_15m:,.2f} USDT.")
                 continue
