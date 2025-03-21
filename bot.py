@@ -1,10 +1,3 @@
-"""
-تم استبدال مكتبة TA-Lib بدالة compute_rsi الخاصة بحساب مؤشر القوة النسبية (RSI)
-لحساب RSI نستخدم المعادلة:
-    RSI = 100 - (100 / (1 + RS))
-حيث RS = متوسط المكاسب / متوسط الخسائر
-"""
-
 import time
 import os
 import pandas as pd
