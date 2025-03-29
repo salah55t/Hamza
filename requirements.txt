@@ -10,4 +10,3 @@ requests
 cachetools
 pandas_ta
 ta
-scikit-learn
