@@ -1017,7 +1017,7 @@ def track_signals():
                             if current_gain_pct >= TRAILING_STOP_ACTIVATION_PROFIT_PCT:
                                 potential_new_stop_loss = current_price - (TRAILING_STOP_ATR_MULTIPLIER * current_atr)
                                 if potential_new_stop_loss > current_stop_loss:
-                                    new_stop_loss = potential_new_stop_loss
+                                    new_stop_loss = potential_new_new_stop_loss = potential_new_stop_loss
                                     logger.info(f"  => [Tracker] تحديث الوقف المتحرك للزوج {symbol} (ID: {signal_id})!")
                                     logger.info(f"     الوقف الجديد: {new_stop_loss:.8f} (السعر الحالي - {TRAILING_STOP_ATR_MULTIPLIER} * ATR)")
                                     safe_symbol = symbol.replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
@@ -1123,9 +1123,11 @@ if __name__ == '__main__':
         logger.critical(f"❌ [Main] فشل تهيئة قاعدة البيانات: {e}")
         exit(1)
     set_telegram_webhook()
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000), name="FlaskThread", daemon=True)
+    # الحصول على المنفذ من متغير البيئة PORT أو استخدام 5000 بشكل افتراضي
+    port = int(os.environ.get("PORT", 5000))
+    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=port), name="FlaskThread", daemon=True)
     flask_thread.start()
-    logger.info("✅ [Main] تم بدء خيط خادم Flask.")
+    logger.info(f"✅ [Main] تم بدء خيط خادم Flask على المنفذ {port}.")
     time.sleep(2)
     websocket_thread = Thread(target=run_ticker_socket_manager, name="WebSocketThread", daemon=True)
     websocket_thread.start()
