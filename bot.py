@@ -16,7 +16,7 @@ import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-from sklearn.ensemble import GradientBoostingRegressor  # موجود في الكود الأصلي (للتنبؤ الاختياري)
+from sklearn.ensemble import GradientBoostingRegressor  # للتنبؤ الاختياري
 from sklearn.linear_model import LinearRegression       # استيراد الانحدار الخطي
 from sklearn.metrics import r2_score                    # لاحتساب معامل التحديد
 
@@ -293,10 +293,12 @@ def calculate_adx(df, period=14):
 
 def is_hammer(row):
     open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close]: return 0
+    if None in [open_price, high, low, close]:
+        return 0
     body = abs(close - open_price)
     candle_range = high - low
-    if candle_range == 0: return 0
+    if candle_range == 0:
+        return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
     if body > 0 and lower_shadow >= 2 * body and upper_shadow <= 0.3 * body:
@@ -305,10 +307,12 @@ def is_hammer(row):
 
 def is_shooting_star(row):
     open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close]: return 0
+    if None in [open_price, high, low, close]:
+        return 0
     body = abs(close - open_price)
     candle_range = high - low
-    if candle_range == 0: return 0
+    if candle_range == 0:
+        return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
     if body > 0 and upper_shadow >= 2 * body and lower_shadow <= 0.3 * body:
@@ -316,10 +320,12 @@ def is_shooting_star(row):
     return 0
 
 def compute_engulfing(df, idx):
-    if idx == 0: return 0
+    if idx == 0:
+        return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
-    if None in [prev['close'], prev['open'], curr['close'], curr['open']]: return 0
+    if None in [prev['close'], prev['open'], curr['close'], curr['open']]:
+        return 0
     if prev['close'] < prev['open'] and curr['close'] > curr['open']:
         if curr['open'] < prev['close'] and curr['close'] > prev['open']:
             return 100
@@ -342,14 +348,20 @@ def detect_candlestick_patterns(df):
 # ---------------------- دوال التنبؤ وتحليل المشاعر ----------------------
 def ml_predict_signal(symbol, df):
     try:
-        if df.empty or 'rsi' not in df.columns or 'adx' not in df.columns: return 0.5
+        if df.empty or 'rsi' not in df.columns or 'adx' not in df.columns:
+            return 0.5
         rsi = df['rsi'].iloc[-1]
         adx = df['adx'].iloc[-1]
-        if pd.isna(rsi) or pd.isna(adx): return 0.5
-        if rsi < 40 and adx > 25: return 0.80
-        elif rsi > 65 and adx > 25: return 0.20
-        else: return 0.5
-    except IndexError: return 0.5
+        if pd.isna(rsi) or pd.isna(adx):
+            return 0.5
+        if rsi < 40 and adx > 25:
+            return 0.80
+        elif rsi > 65 and adx > 25:
+            return 0.20
+        else:
+            return 0.5
+    except IndexError:
+        return 0.5
     except Exception as e:
         logger.error(f"❌ [ML] خطأ في ml_predict_signal للزوج {symbol}: {e}")
         return 0.5
@@ -501,22 +513,27 @@ class FreqtradeStrategy:
 def improved_predict_future_price(symbol, interval='2h', days=30):
     try:
         df = fetch_historical_data(symbol, interval, days)
-        if df is None or len(df) < 50: return None
+        if df is None or len(df) < 50:
+            return None
         df['ema_fast'] = calculate_ema(df['close'], 10)
         df['ema_slow'] = calculate_ema(df['close'], 30)
         df['rsi'] = calculate_rsi_indicator(df)
         df = df.dropna()
-        if len(df) < 2: return None
+        if len(df) < 2:
+            return None
         features = ['ema_fast', 'ema_slow', 'rsi']
-        if not all(f in df.columns for f in features): return None
+        if not all(f in df.columns for f in features):
+            return None
         X = df[features].iloc[:-1].values
         y = df['close'].iloc[1:].values
-        if len(X) == 0: return None
+        if len(X) == 0:
+            return None
         model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42, learning_rate=0.1)
         model.fit(X, y)
         last_features = df[features].iloc[-1].values.reshape(1, -1)
         predicted_price = model.predict(last_features)[0]
-        if predicted_price <= 0: return None
+        if predicted_price <= 0:
+            return None
         logger.info(f"✅ [Price Prediction] السعر المتوقع للزوج {symbol} ({interval}, {days} يوم): {predicted_price:.8f}")
         return predicted_price
     except ImportError:
@@ -553,7 +570,7 @@ def generate_signal_using_freqtrade_strategy(df_input, symbol):
     predicted_price, lr_score = predict_price_linear_regression(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
     if predicted_price is not None and lr_score is not None:
         profit_margin = ((predicted_price / current_price) - 1) * 100
-        # إذا كان السعر المتوقع يزيد عن السعر الحالي بنسبة 4% والمعامل أكبر من 0.97
+        # إذا كان السعر المتوقع يزيد عن السعر الحالي بنسبة 4% أو أكثر والمعامل أكبر من 0.97
         if profit_margin >= 4 and lr_score > 0.97:
             target_price = predicted_price
             logger.info(f"✅ [Signal Gen] استخدام السعر المتوقع من Linear Regression كهدف للزوج {symbol} (السعر المتوقع: {predicted_price:.8f}, R²: {lr_score:.4f})")
@@ -636,11 +653,11 @@ def webhook():
              user_id = user_info.get("id")
              username = user_info.get("username", "N/A")
              command = text.lower()
-             if command == '/report' or command == '/stats' or command == '/تقرير':
+             if command in ['/report', '/stats', '/تقرير']:
                   logger.info(f"ℹ️ [Webhook] تم استلام الأمر '{text}' من المستخدم @{username} (ID: {user_id}) في الدردشة {chat_id_msg}.")
                   Thread(target=send_report, args=(chat_id_msg,), daemon=True).start()
                   return '', 200
-             elif command == '/status' or command == '/الحالة':
+             elif command in ['/status', '/الحالة']:
                  logger.info(f"ℹ️ [Webhook] تم استلام الأمر '{text}' من المستخدم @{username} (ID: {user_id}) في الدردشة {chat_id_msg}.")
                  ws_status = 'نعم' if websocket_thread and websocket_thread.is_alive() else 'لا'
                  tracker_status = 'نعم' if tracker_thread and tracker_thread.is_alive() else 'لا'
@@ -934,7 +951,8 @@ def send_report(target_chat_id):
         logger.info(f"✅ [Report] تم إرسال تقرير الأداء بنجاح إلى الدردشة {target_chat_id}.")
     except psycopg2.Error as db_err:
         logger.error(f"❌ [Report] خطأ في قاعدة البيانات أثناء إنشاء التقرير: {db_err}")
-        if conn and not conn.closed: conn.rollback()
+        if conn and not conn.closed:
+            conn.rollback()
         report_message = f"⚠️ حدث خطأ في قاعدة البيانات أثناء إنشاء التقرير.\n`{db_err}`"
         try:
             send_telegram_update(report_message, chat_id_override=target_chat_id)
@@ -1011,7 +1029,8 @@ def track_signals():
                         logger.info(f"✅ [Tracker] تم إغلاق التوصية {symbol} (ID: {signal_id}) - تحقيق الهدف.")
                     except Exception as update_err:
                         logger.error(f"❌ [Tracker] خطأ أثناء تحديث/إرسال إغلاق الهدف للتوصية {signal_id}: {update_err}")
-                        if conn and not conn.closed: conn.rollback()
+                        if conn and not conn.closed:
+                            conn.rollback()
                     continue
                 elif current_price <= current_stop_loss:
                     loss_pct = ((current_stop_loss / entry_price) - 1) * 100
@@ -1034,7 +1053,8 @@ def track_signals():
                         logger.info(f"✅ [Tracker] تم إغلاق التوصية {symbol} (ID: {signal_id}) - {stop_type_msg}.")
                     except Exception as update_err:
                         logger.error(f"❌ [Tracker] خطأ أثناء تحديث/إرسال إغلاق وقف الخسارة للتوصية {signal_id}: {update_err}")
-                        if conn and not conn.closed: conn.rollback()
+                        if conn and not conn.closed:
+                            conn.rollback()
                     continue
                 df_track = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                 if df_track is None or df_track.empty or len(df_track) < 20:
@@ -1073,7 +1093,8 @@ def track_signals():
                                         logger.info(f"✅ [Tracker] تم تحديث الوقف المتحرك للتوصية {symbol} (ID: {signal_id}) إلى {new_stop_loss:.8f}")
                                     except Exception as update_err:
                                          logger.error(f"❌ [Tracker] خطأ أثناء تحديث/إرسال تحديث الوقف المتحرك للتوصية {signal_id}: {update_err}")
-                                         if conn and not conn.closed: conn.rollback()
+                                         if conn and not conn.closed:
+                                             conn.rollback()
         except Exception as e:
             logger.error(f"❌ [Tracker] حدث خطأ أثناء تتبع التوصيات: {e}", exc_info=True)
             time.sleep(60)
@@ -1127,7 +1148,8 @@ def analyze_market():
                 send_telegram_alert(signal, volume, btc_dominance, eth_dominance, SIGNAL_GENERATION_TIMEFRAME)
             except Exception as insert_err:
                 logger.error(f"❌ [Market Analysis] خطأ أثناء حفظ الإشارة للزوج {symbol}: {insert_err}")
-                if conn and not conn.closed: conn.rollback()
+                if conn and not conn.closed:
+                    conn.rollback()
     logger.info(f"✅ [Market Analysis] تم توليد {generated_signals_count} إشارة/إشارات جديدة من {processed_symbols_count} زوج.")
 
 def can_generate_new_recommendation():
@@ -1145,7 +1167,7 @@ def can_generate_new_recommendation():
         logger.error(f"❌ [Gate] خطأ أثناء التحقق من عدد التوصيات المفتوحة: {e}")
         return False
 
-# ---------------------- بدء تشغيل التطبيق ----------------------
+# ---------------------- التشغيل الرئيسي ----------------------
 if __name__ == '__main__':
     try:
         init_db()
@@ -1153,35 +1175,24 @@ if __name__ == '__main__':
         logger.critical(f"❌ [Main] فشل تهيئة قاعدة البيانات: {e}")
         exit(1)
     set_telegram_webhook()
-    port = int(os.environ.get("PORT", 5000))
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=port), name="FlaskThread", daemon=True)
-    flask_thread.start()
-    logger.info(f"✅ [Main] تم بدء خيط خادم Flask على المنفذ {port}.")
-    time.sleep(2)
+
+    # بدء خيوط الخدمات الخلفية
     websocket_thread = Thread(target=run_ticker_socket_manager, name="WebSocketThread", daemon=True)
     websocket_thread.start()
     logger.info("✅ [Main] تم بدء خيط مدير WebSocket.")
-    logger.info("ℹ️ [Main] السماح بـ 15 ثانية لـ WebSocket للاتصال واستقبال البيانات الأولية...")
-    time.sleep(15)
+
     tracker_thread = Thread(target=track_signals, name="TrackerThread", daemon=True)
     tracker_thread.start()
     logger.info("✅ [Main] تم بدء خيط تتبع التوصيات.")
+
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(analyze_market, 'interval', minutes=5, id='market_analyzer', replace_existing=True, misfire_grace_time=60)
-    logger.info("✅ [Main] تم جدولة مهمة تحليل السوق (كل 5 دقائق).")
     scheduler.start()
     logger.info("✅ [Main] تم بدء تشغيل APScheduler.")
     logger.info("==========================================")
     logger.info("✅ النظام متصل ويعمل الآن")
     logger.info("==========================================")
-    while True:
-        if flask_thread and not flask_thread.is_alive():
-             logger.critical("❌ [Main] توقف خيط Flask! الخروج.")
-             break
-        if websocket_thread and not websocket_thread.is_alive():
-             logger.critical("❌ [Main] توقف خيط WebSocket! الخروج.")
-             break
-        if tracker_thread and not tracker_thread.is_alive():
-             logger.critical("❌ [Main] توقف خيط تتبع التوصيات! الخروج.")
-             break
-        time.sleep(10)
+
+    # تشغيل تطبيق Flask في الخيط الرئيسي حتى يتم ربط الخدمة بالمنفذ المفتوح
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
