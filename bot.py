@@ -878,7 +878,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
         profit_usdt = TRADE_VALUE * (profit_pct / 100)
         loss_usdt = TRADE_VALUE * (loss_pct / 100) # ستكون قيمة سالبة
 
-        timestamp = (datetime.utcnow() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M') # تعديل للتوقيت المحلي +3
+        timestamp = (datetime.utcnow() + timedelta(hours=1)).strftime('%Y-%m-%d %H:%M') # تعديل للتوقيت المحلي +3
         fng_value, fng_label = get_fear_greed_index()
 
         # تهريب حروف الماركداون الحساسة في اسم الزوج
