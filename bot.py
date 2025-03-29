@@ -96,7 +96,6 @@ def init_db():
                 )
             """)
             conn.commit()
-            # (يمكنك إضافة أو تعديل الأعمدة كما هو مطلوب)
             logger.info("✅ [DB] تم تأسيس الاتصال بقاعدة البيانات بنجاح.")
             return
         except Exception as e:
@@ -293,7 +292,7 @@ def ml_predict_signal(symbol, df):
         return 0.5
 
 def get_market_sentiment(symbol):
-    return 0.6  # قيمة مؤقتة
+    return 0.6
 
 def get_fear_greed_index():
     try:
@@ -315,7 +314,7 @@ def get_fear_greed_index():
             logger.info(f"✅ [FNG] مؤشر الخوف والجشع: {fng_value:.0f} - {fng_classification_ar}")
             return fng_value, fng_classification_ar
         else:
-            logger.warning("⚠️ [FNG] لم يتم العثور على بيانات في استجابة مؤشر الخوف والجشع.")
+            logger.warning("⚠️ [FNG] لم يتم العثور على بيانات مؤشر الخوف والجشع.")
             return 50.0, "محايد"
     except Exception as e:
         logger.error(f"❌ [FNG] خطأ في جلب مؤشر الخوف والجشع: {e}")
@@ -347,10 +346,10 @@ def predict_price_linear_regression(symbol, interval='2h', days=30):
         logger.info(f"✅ [Linear Regression] للزوج {symbol} السعر المتوقع: {predicted_price:.8f} بمعامل R²: {score:.4f}")
         return predicted_price, score
     except Exception as e:
-        logger.error(f"❌ [Linear Regression] خطأ أثناء التنبؤ بالسعر للزوج {symbol}: {e}")
+        logger.error(f"❌ [Linear Regression] خطأ في التنبؤ للسعر للزوج {symbol}: {e}")
         return None, None
 
-# ---------------------- استراتيجية Freqtrade المحسّنة ----------------------
+# ---------------------- استراتيجية Freqtrade ----------------------
 class FreqtradeStrategy:
     def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         if len(df) < 50:
@@ -374,8 +373,6 @@ class FreqtradeStrategy:
             df = detect_candlestick_patterns(df)
             initial_len = len(df)
             df = df.dropna()
-            if initial_len - len(df) > 0:
-                logger.debug(f"ℹ️ [Strategy] حذف {initial_len - len(df)} صف بعد إزالة NaN.")
             logger.info(f"✅ [Strategy] المؤشرات محسوبة (الحجم: {len(df)}).")
             return df
         except Exception as e:
@@ -421,7 +418,7 @@ class FreqtradeStrategy:
             logger.info(f"✅ [Strategy] تحديد {df['buy'].sum()} إشارة شراء محتملة.")
         return df
 
-# ---------------------- دالة التنبؤ بالسعر المحسّنة ----------------------
+# ---------------------- دالة التنبؤ بالسعر المحسنة ----------------------
 def improved_predict_future_price(symbol, interval='2h', days=30):
     try:
         df = fetch_historical_data(symbol, interval, days)
@@ -442,12 +439,10 @@ def improved_predict_future_price(symbol, interval='2h', days=30):
         model.fit(X, y)
         last_features = df[features].iloc[-1].values.reshape(1, -1)
         predicted_price = model.predict(last_features)[0]
-        if predicted_price <= 0:
-            return None
         logger.info(f"✅ [Price Prediction] للزوج {symbol} السعر المتوقع: {predicted_price:.8f}")
         return predicted_price
     except Exception as e:
-        logger.error(f"❌ [Price Prediction] خطأ في التنبؤ بالسعر للزوج {symbol}: {e}")
+        logger.error(f"❌ [Price Prediction] خطأ في التنبؤ للسعر للزوج {symbol}: {e}")
         return None
 
 # ---------------------- دالة توليد الإشارة ----------------------
@@ -473,7 +468,6 @@ def generate_signal_using_freqtrade_strategy(df_input, symbol):
         logger.warning(f"⚠️ [Signal Gen] بيانات سعر أو ATR غير صالحة للزوج {symbol}.")
         return None
 
-    # استخدام نموذج الانحدار الخطي للتنبؤ بالسعر
     predicted_price, lr_score = predict_price_linear_regression(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
     if predicted_price is not None and lr_score is not None:
         profit_margin = ((predicted_price / current_price) - 1) * 100
@@ -545,13 +539,13 @@ def fetch_historical_data(symbol, interval='1h', days=10):
         initial_len = len(df)
         df.dropna(subset=['open', 'high', 'low', 'close'], inplace=True)
         if len(df) < initial_len:
-            logger.debug(f"ℹ️ [Data] حذف {initial_len - len(df)} صف بسبب NaN للزوج {symbol}.")
+            logger.debug(f"ℹ️ [Data] حذف {initial_len - len(df)} صف للزوج {symbol} بسبب NaN.")
         if df.empty:
             logger.warning(f"⚠️ [Data] DataFrame للزوج {symbol} فارغ بعد معالجة NaN.")
             return None
         return df[['timestamp', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
-        logger.error(f"❌ [Data] خطأ في جلب البيانات للزوج {symbol}: {e}")
+        logger.error(f"❌ [Data] خطأ في جلب بيانات الزوج {symbol}: {e}")
         return None
 
 def fetch_recent_volume(symbol):
@@ -734,7 +728,7 @@ def send_report(target_chat_id):
 
 # ---------------------- تتبع التوصيات ----------------------
 def track_signals():
-    logger.info(f"🔄 [Tracker] بدء تتبع التوصيات...")
+    logger.info("🔄 [Tracker] بدء تتبع التوصيات...")
     while True:
         try:
             check_db_connection()
@@ -807,7 +801,7 @@ def track_signals():
                         if conn and not conn.closed:
                             conn.rollback()
                     continue
-                # تحديث وقف الخسارة المتحرك (إن وجد بيانات كافية)
+                # تحديث وقف الخسارة المتحرك إذا توفر بيانات كافية
                 df_track = fetch_historical_data(symbol, interval=SIGNAL_TRACKING_TIMEFRAME, days=SIGNAL_TRACKING_LOOKBACK_DAYS)
                 if df_track is None or df_track.empty or len(df_track) < 20:
                     logger.warning(f"⚠️ [Tracker] بيانات {SIGNAL_TRACKING_TIMEFRAME} غير كافية للزوج {symbol}.")
@@ -840,7 +834,7 @@ def track_signals():
                                         conn.commit()
                                         logger.info(f"✅ [Tracker] وقف خسارة محدث للزوج {symbol} (ID: {signal_id}).")
                                     except Exception as update_err:
-                                        logger.error(f"❌ [Tracker] خطأ في تحديث وقف الخسارة للتوصية {signal_id}: {update_err}")
+                                        logger.error(f"❌ [Tracker] خطأ في تحديث وقف الخسارة لتوصية {signal_id}: {update_err}")
                                         if conn and not conn.closed:
                                             conn.rollback()
             time.sleep(30)
@@ -851,7 +845,7 @@ def track_signals():
 # ---------------------- تحليل السوق ----------------------
 def analyze_market():
     logger.info("==========================================")
-    logger.info(f" H [Market Analysis] بدء تحليل السوق...")
+    logger.info(" H [Market Analysis] بدء تحليل السوق...")
     if not can_generate_new_recommendation():
         logger.info(" H [Market Analysis] تم الوصول للحد الأقصى للتوصيات المفتوحة.")
         return
@@ -904,12 +898,9 @@ def can_generate_new_recommendation():
         check_db_connection()
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
         active_count = cur.fetchone()[0]
-        if active_count < MAX_OPEN_TRADES:
-            return True
-        else:
-            return False
+        return active_count < MAX_OPEN_TRADES
     except Exception as e:
-        logger.error(f"❌ [Gate] خطأ أثناء التحقق من عدد التوصيات: {e}")
+        logger.error(f"❌ [Gate] خطأ في التحقق من عدد التوصيات: {e}")
         return False
 
 # ---------------------- إعداد تطبيق Flask ----------------------
@@ -926,15 +917,15 @@ def webhook():
         if not update:
             logger.warning("⚠️ [Webhook] تحديث فارغ.")
             return '', 200
-        # يمكنك تضمين كود معالجة التحديث كما في النسخ السابقة
         logger.info("ℹ️ [Webhook] تحديث مستلم.")
+        # يمكن تضمين منطق المعالجة هنا حسب الحاجة
         return '', 200
     except Exception as e:
         logger.error(f"❌ [Webhook] خطأ في معالجة التحديث: {e}", exc_info=True)
         return 'Internal Server Error', 500
 
 def set_telegram_webhook():
-    # يمكنك تضمين كود تعيين webhook كما في النسخ السابقة
+    # يمكن تضمين كود تعيين webhook لتليجرام هنا إذا لزم الأمر
     pass
 
 # ---------------------- تشغيل الخدمات الخلفية ----------------------
@@ -966,10 +957,10 @@ if __name__ == '__main__':
     start_background_services()
     logger.info("✅ النظام متصل ويعمل الآن.")
 
-    # تشغيل Flask في خيط منفصل مع ربط الخدمة بالمنفذ المحدد
+    # تشغيل Flask في خيط منفصل مع الربط بالمنفذ المحدد
     port = int(os.environ.get("PORT", 5000))
     flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=port), name="FlaskThread")
     flask_thread.start()
 
-    # الانتظار في الخيط الرئيسي حتى انتهاء خيط Flask
+    # الانتظار في الخيط الرئيسي حتى انتهاء خيط Flask لضمان بقاء الخدمة live
     flask_thread.join()
