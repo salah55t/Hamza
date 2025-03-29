@@ -885,7 +885,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
         safe_symbol = signal['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
 
         message = (
-            f"🚀 **توصية تداول جديدة** 🚀\n"
+            f"🚀 ** fbh توصية تداول جديدة** 🚀\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **سعر الدخول المقترح:** `${entry_price:.8f}`\n"
