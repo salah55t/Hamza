@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*- # لتحديد الترميز
+# -*- coding: utf-8 -*-  # لتحديد الترميز
 
 import time
 import os
@@ -16,14 +16,14 @@ import json
 from decouple import config
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta
-from sklearn.ensemble import GradientBoostingRegressor # For price prediction (optional)
+# لم نعد بحاجة لمكتبة GradientBoostingRegressor هنا لأنها كانت ضمن استراتيجية سابقة
 
 # ---------------------- إعدادات التسجيل ----------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('crypto_bot_ar.log', encoding='utf-8'), # تحديد الترميز للملف
+        logging.FileHandler('crypto_bot_ar.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -43,20 +43,22 @@ logger.info(f" رابط قاعدة البيانات: {'موجود' if db_url els
 
 # ---------------------- ثوابت وإعدادات الاستراتيجية ----------------------
 TRADE_VALUE = 10  # قيمة الصفقة الثابتة بالدولار
-MAX_OPEN_TRADES = 4 # الحد الأقصى للصفقات المفتوحة في نفس الوقت
-SIGNAL_GENERATION_TIMEFRAME = '1h' # الفريم الزمني لتوليد توصيات جديدة
-SIGNAL_GENERATION_LOOKBACK_DAYS = 4 # عدد أيام البيانات التاريخية لتوليد التوصيات
-SIGNAL_TRACKING_TIMEFRAME = '15m' # الفريم الزمني لتتبع التوصيات المفتوحة
-SIGNAL_TRACKING_LOOKBACK_DAYS = 2 # عدد أيام البيانات التاريخية لتتبع التوصيات
+MAX_OPEN_TRADES = 4  # الحد الأقصى للصفقات المفتوحة
+
+# تعديل الفريمات لتناسب توصيات فريم 5 دقائق
+SIGNAL_GENERATION_TIMEFRAME = '5m'  # فريم توليد التوصيات أصبح 5 دقائق
+SIGNAL_GENERATION_LOOKBACK_DAYS = 1  # فترة بيانات يوم واحد
+SIGNAL_TRACKING_TIMEFRAME = '5m'    # فريم تتبع التوصيات أصبح 5 دقائق
+SIGNAL_TRACKING_LOOKBACK_DAYS = 1
 
 # إعدادات وقف الخسارة المتحرك (ATR Trailing Stop)
-TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015 # نسبة الربح المطلوبة لتفعيل الوقف المتحرك (e.g., 1.5%)
-TRAILING_STOP_ATR_MULTIPLIER = 2.0 # معامل ATR لتحديد مسافة الوقف المتحرك
+TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015
+TRAILING_STOP_ATR_MULTIPLIER = 2.0
 
 # إعدادات إشارة الدخول
-ENTRY_ATR_MULTIPLIER = 1.5 # معامل ATR لتحديد الهدف ووقف الخسارة الأولي
-MIN_PROFIT_MARGIN_PCT = 1.0 # الحد الأدنى لهامش الربح المطلوب في الإشارة الأولية (%)
-MIN_VOLUME_15M_USDT = 500000 # الحد الأدنى لحجم التداول في آخر 15 دقيقة
+ENTRY_ATR_MULTIPLIER = 1.5
+MIN_PROFIT_MARGIN_PCT = 1.0
+MIN_VOLUME_15M_USDT = 500000
 
 # ---------------------- إعداد الاتصال بقاعدة البيانات ----------------------
 conn = None
@@ -70,18 +72,18 @@ def init_db():
         try:
             logger.info(f"[DB] محاولة الاتصال بقاعدة البيانات (محاولة {i+1}/{retries})...")
             conn = psycopg2.connect(db_url, connect_timeout=10)
-            conn.autocommit = False # مهم للمعاملات الآمنة
+            conn.autocommit = False
             cur = conn.cursor()
-            # إنشاء الجدول إذا لم يكن موجودًا، مع الأعمدة المحدثة والقيود
+            # إنشاء جدول الإشارات إذا لم يكن موجوداً
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id SERIAL PRIMARY KEY,
                     symbol TEXT NOT NULL,
                     entry_price DOUBLE PRECISION NOT NULL,
-                    initial_target DOUBLE PRECISION NOT NULL, -- الهدف الأولي
-                    initial_stop_loss DOUBLE PRECISION NOT NULL, -- وقف الخسارة الأولي
-                    current_target DOUBLE PRECISION NOT NULL, -- الهدف الحالي (يمكن تحديثه)
-                    current_stop_loss DOUBLE PRECISION NOT NULL, -- وقف الخسارة الحالي (يمكن تحديثه)
+                    initial_target DOUBLE PRECISION NOT NULL,
+                    initial_stop_loss DOUBLE PRECISION NOT NULL,
+                    current_target DOUBLE PRECISION NOT NULL,
+                    current_stop_loss DOUBLE PRECISION NOT NULL,
                     r2_score DOUBLE PRECISION,
                     volume_15m DOUBLE PRECISION,
                     achieved_target BOOLEAN DEFAULT FALSE,
@@ -94,9 +96,8 @@ def init_db():
                     is_trailing_active BOOLEAN DEFAULT FALSE
                 )
             """)
-            conn.commit() # تأكيد إنشاء الجدول فوراً
-
-            # --- إضافة الأعمدة الجديدة إذا لم تكن موجودة ---
+            conn.commit()
+            # إضافة الأعمدة الجديدة إن لم تكن موجودة بالفعل
             new_columns = {
                 "initial_target": "DOUBLE PRECISION",
                 "initial_stop_loss": "DOUBLE PRECISION",
@@ -113,7 +114,7 @@ def init_db():
                      logger.info(f"✅ [DB] تمت إضافة العمود '{col_name}' إلى جدول 'signals'.")
                      table_changed = True
                  except psycopg2.Error as e:
-                     if e.pgcode == '42701':  # duplicate_column
+                     if e.pgcode == '42701':
                          conn.rollback()
                      else:
                          logger.error(f"❌ [DB] فشل في إضافة العمود '{col_name}': {e} (pgcode: {e.pgcode})")
@@ -142,6 +143,19 @@ def init_db():
                  logger.info("✅ [DB] تم تحديث/التحقق من بنية قاعدة البيانات بنجاح.")
             else:
                  logger.info("✅ [DB] بنية قاعدة البيانات محدثة.")
+            
+            # إنشاء جدول نسب الاستحواذ إذا لم يكن موجوداً
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS market_dominance (
+                    id SERIAL PRIMARY KEY,
+                    recorded_at TIMESTAMP DEFAULT NOW(),
+                    btc_dominance DOUBLE PRECISION,
+                    eth_dominance DOUBLE PRECISION
+                )
+            """)
+            conn.commit()
+            logger.info("✅ [DB] تم تأسيس جدول market_dominance بنجاح.")
+            
             logger.info("✅ [DB] تم تأسيس الاتصال بقاعدة البيانات بنجاح.")
             return
         except (psycopg2.OperationalError, psycopg2.DatabaseError) as e:
@@ -188,14 +202,14 @@ def check_db_connection():
 # ---------------------- إعداد عميل Binance ----------------------
 try:
     client = Client(api_key, api_secret)
-    client.ping()  # اختبار الاتصال
+    client.ping()
     logger.info("✅ [Binance] تم تهيئة عميل Binance والتحقق من الاتصال.")
 except Exception as e:
     logger.critical(f"❌ [Binance] فشل في تهيئة عميل Binance: {e}. تحقق من مفاتيح API والاتصال.")
     raise
 
 # ---------------------- استخدام WebSocket لتحديث بيانات التيكر ----------------------
-ticker_data = {}  # قاموس لتخزين أحدث بيانات التيكر لكل زوج
+ticker_data = {}
 
 def handle_ticker_message(msg):
     """يعالج رسائل WebSocket الواردة ويحدث قاموس ticker_data."""
@@ -205,10 +219,10 @@ def handle_ticker_message(msg):
                 symbol = m.get('s')
                 if symbol and 'USDT' in symbol:
                     ticker_data[symbol] = {
-                        'c': m.get('c'),  # السعر الحالي
-                        'h': m.get('h'),  # أعلى سعر 24 ساعة
-                        'l': m.get('l'),  # أدنى سعر 24 ساعة
-                        'v': m.get('v')   # حجم التداول الكلي للأصل الأساسي 24 ساعة
+                        'c': m.get('c'),
+                        'h': m.get('h'),
+                        'l': m.get('l'),
+                        'v': m.get('v')
                     }
         elif isinstance(msg, dict) and 'stream' not in msg and 'e' in msg and msg['e'] == 'error':
             logger.error(f"❌ [WS] تم استلام رسالة خطأ من WebSocket: {msg.get('m')}")
@@ -235,7 +249,7 @@ def run_ticker_socket_manager():
 def calculate_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
-def calculate_rsi_indicator(df, period=14):
+def calculate_rsi_indicator(df, period=7):
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
@@ -245,7 +259,7 @@ def calculate_rsi_indicator(df, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_atr_indicator(df, period=14):
+def calculate_atr_indicator(df, period=7):
     high_low = df['high'] - df['low']
     high_close = (df['high'] - df['close'].shift(1)).abs()
     low_close = (df['low'] - df['close'].shift(1)).abs()
@@ -254,7 +268,7 @@ def calculate_atr_indicator(df, period=14):
     df['atr'] = atr
     return df
 
-def calculate_macd(df, fast_period=10, slow_period=21, signal_period=8):
+def calculate_macd(df, fast_period=5, slow_period=13, signal_period=5):
     df['ema_fast'] = calculate_ema(df['close'], fast_period)
     df['ema_slow'] = calculate_ema(df['close'], slow_period)
     df['macd'] = df['ema_fast'] - df['ema_slow']
@@ -262,7 +276,7 @@ def calculate_macd(df, fast_period=10, slow_period=21, signal_period=8):
     df['macd_hist'] = df['macd'] - df['macd_signal']
     return df
 
-def calculate_kdj(df, period=14, k_period=3, d_period=3):
+def calculate_kdj(df, period=7, k_period=3, d_period=3):
     low_min = df['low'].rolling(window=period).min()
     high_max = df['high'].rolling(window=period).max()
     rsv_denominator = (high_max - low_min).replace(0, np.nan)
@@ -272,7 +286,7 @@ def calculate_kdj(df, period=14, k_period=3, d_period=3):
     df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
     return df
 
-def calculate_adx(df, period=14):
+def calculate_adx(df, period=7):
     df['up_move'] = df['high'] - df['high'].shift(1)
     df['down_move'] = df['low'].shift(1) - df['low']
     df['+dm'] = np.where((df['up_move'] > df['down_move']) & (df['up_move'] > 0), df['up_move'], 0)
@@ -295,10 +309,12 @@ def calculate_adx(df, period=14):
 
 def is_hammer(row):
     open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close]: return 0
+    if None in [open_price, high, low, close]:
+        return 0
     body = abs(close - open_price)
     candle_range = high - low
-    if candle_range == 0: return 0
+    if candle_range == 0:
+        return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
     if body > 0 and lower_shadow >= 2 * body and upper_shadow <= 0.3 * body:
@@ -307,10 +323,12 @@ def is_hammer(row):
 
 def is_shooting_star(row):
     open_price, high, low, close = row['open'], row['high'], row['low'], row['close']
-    if None in [open_price, high, low, close]: return 0
+    if None in [open_price, high, low, close]:
+        return 0
     body = abs(close - open_price)
     candle_range = high - low
-    if candle_range == 0: return 0
+    if candle_range == 0:
+        return 0
     lower_shadow = min(open_price, close) - low
     upper_shadow = high - max(open_price, close)
     if body > 0 and upper_shadow >= 2 * body and lower_shadow <= 0.3 * body:
@@ -318,10 +336,12 @@ def is_shooting_star(row):
     return 0
 
 def compute_engulfing(df, idx):
-    if idx == 0: return 0
+    if idx == 0:
+        return 0
     prev = df.iloc[idx - 1]
     curr = df.iloc[idx]
-    if None in [prev['close'], prev['open'], curr['close'], curr['open']]: return 0
+    if None in [prev['close'], prev['open'], curr['close'], curr['open']]:
+        return 0
     if prev['close'] < prev['open'] and curr['close'] > curr['open']:
         if curr['open'] < prev['close'] and curr['close'] > prev['open']:
             return 100
@@ -341,217 +361,102 @@ def detect_candlestick_patterns(df):
     df['BearishSignal'] = df.apply(lambda row: 100 if (row['ShootingStar'] == -100 or row['Engulfing'] == -100) else 0, axis=1)
     return df
 
-# ---------------------- دوال التنبؤ وتحليل المشاعر ----------------------
-def ml_predict_signal(symbol, df):
-    try:
-        if df.empty or 'rsi' not in df.columns or 'adx' not in df.columns: return 0.5
-        rsi = df['rsi'].iloc[-1]
-        adx = df['adx'].iloc[-1]
-        if pd.isna(rsi) or pd.isna(adx): return 0.5
-        if rsi < 40 and adx > 25: return 0.80
-        elif rsi > 65 and adx > 25: return 0.20
-        else: return 0.5
-    except IndexError: return 0.5
-    except Exception as e:
-        logger.error(f"❌ [ML] خطأ في ml_predict_signal للزوج {symbol}: {e}")
-        return 0.5
-
-def get_market_sentiment(symbol):
-    return 0.6 # إيجابي مؤقتًا
-
-def get_fear_greed_index():
-    try:
-        url = "https://api.alternative.me/fng/?limit=1&format=json"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if data.get("data"):
-            fng_value = float(data["data"][0].get("value", 50))
-            fng_classification_en = data["data"][0].get("value_classification", "Neutral")
-            fng_translations = {
-                "Extreme Fear": "خوف شديد",
-                "Fear": "خوف",
-                "Neutral": "محايد",
-                "Greed": "جشع",
-                "Extreme Greed": "جشع شديد"
-            }
-            fng_classification_ar = fng_translations.get(fng_classification_en, fng_classification_en)
-            logger.info(f"✅ [FNG] مؤشر الخوف والجشع: {fng_value:.0f} - {fng_classification_ar}")
-            return fng_value, fng_classification_ar
-        else:
-            logger.warning("⚠️ [FNG] لم يتم العثور على بيانات في استجابة مؤشر الخوف والجشع.")
-            return 50.0, "محايد"
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [FNG] خطأ في طلب مؤشر الخوف والجشع: {e}")
-        return 50.0, "خطأ"
-    except Exception as e:
-        logger.error(f"❌ [FNG] خطأ غير متوقع في جلب مؤشر الخوف والجشع: {e}")
-        return 50.0, "خطأ"
-
-# ---------------------- استراتيجية Freqtrade المحسّنة (كفئة) ----------------------
-class FreqtradeStrategy:
-    def populate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        if len(df) < 50:
-            logger.warning(f"⚠️ [Strategy] DataFrame قصير جدًا ({len(df)} شمعة) لحساب جميع المؤشرات.")
-            if all(col in df.columns for col in ['open', 'high', 'low', 'close']):
-                 return df
-            else:
-                 return pd.DataFrame()
-        try:
-            df['ema5'] = calculate_ema(df['close'], 5)
-            df['ema8'] = calculate_ema(df['close'], 8)
-            df['ema21'] = calculate_ema(df['close'], 21)
-            df['ema34'] = calculate_ema(df['close'], 34)
-            df['ema50'] = calculate_ema(df['close'], 50)
-            df['rsi'] = calculate_rsi_indicator(df)
-            df['sma20'] = df['close'].rolling(window=20).mean()
-            df['std20'] = df['close'].rolling(window=20).std()
-            df['upper_band'] = df['sma20'] + (2.5 * df['std20'])
-            df['lower_band'] = df['sma20'] - (2.5 * df['std20'])
-            df = calculate_atr_indicator(df)
-            df = calculate_macd(df)
-            df = calculate_kdj(df)
-            df = calculate_adx(df)
-            df = detect_candlestick_patterns(df)
-            initial_len = len(df)
-            df = df.dropna()
-            dropped_count = initial_len - len(df)
-            if dropped_count > 0:
-                logger.debug(f"ℹ️ [Strategy] تم حذف {dropped_count} صفًا يحتوي على NaN بعد حساب المؤشرات.")
-            if df.empty:
-                logger.warning("⚠️ [Strategy] أصبح DataFrame فارغًا بعد حساب المؤشرات وحذف NaN.")
-                return pd.DataFrame()
-            logger.info(f"✅ [Strategy] تم حساب المؤشرات لـ DataFrame (الحجم النهائي: {len(df)})")
-            return df
-        except Exception as e:
-            logger.error(f"❌ [Strategy] خطأ أثناء حساب المؤشرات: {e}", exc_info=True)
-            return pd.DataFrame()
-
-    def composite_buy_score(self, row):
-        score = 0
-        required_cols = ['ema5', 'ema8', 'ema21', 'ema34', 'ema50', 'rsi', 'close', 'lower_band', 'macd', 'macd_signal', 'macd_hist', 'kdj_j', 'kdj_k', 'kdj_d', 'adx', 'BullishSignal']
-        if any(col not in row or pd.isna(row[col]) for col in required_cols):
-            return 0
-        try:
-            if row['ema5'] > row['ema8'] > row['ema21'] > row['ema34'] > row['ema50']:
-                score += 1.5
-            if row['rsi'] < 40:
-                score += 1
-            if row['close'] > row['lower_band'] and ((row['close'] - row['lower_band']) / row['close'] < 0.02):
-                score += 1
-            if row['macd'] > row['macd_signal'] and row['macd_hist'] > 0:
-                score += 1
-            if row['kdj_j'] > row['kdj_k'] and row['kdj_k'] > row['kdj_d'] and row['kdj_j'] < 80:
-                score += 1
-            if row['adx'] > 20:
-                score += 0.5
-            if row['BullishSignal'] == 100:
-                score += 1.5
-        except TypeError as e:
-             logger.error(f"❌ [Strategy] خطأ نوع البيانات في حساب composite_buy_score: {e}. بيانات الصف: {row.to_dict()}")
-             return 0
-        except Exception as e:
-             logger.error(f"❌ [Strategy] خطأ غير متوقع في composite_buy_score: {e}", exc_info=True)
-             return 0
-        return score
-
-    def populate_buy_trend(self, df: pd.DataFrame) -> pd.DataFrame:
-        required_score = 4.0
-        required_cols = ['ema5', 'rsi', 'lower_band', 'macd', 'kdj_j', 'adx', 'BullishSignal']
-        if df.empty or not all(col in df.columns for col in required_cols):
-             logger.warning("⚠️ [Strategy] DataFrame يفتقد للأعمدة المطلوبة لحساب اتجاه الشراء.")
-             df['buy_score'] = 0
-             df['buy'] = 0
-             return df
-        df['buy_score'] = df.apply(lambda row: self.composite_buy_score(row) if not row.isnull().any() else 0, axis=1)
-        df['buy'] = np.where(df['buy_score'] >= required_score, 1, 0)
-        buy_signals_count = df['buy'].sum()
-        if buy_signals_count > 0:
-             logger.info(f"✅ [Strategy] تم تحديد {buy_signals_count} إشارة/إشارات شراء محتملة (الدرجة >= {required_score}).")
-        return df
-
-# ---------------------- دالة التنبؤ بالسعر المحسّنة ----------------------
-def improved_predict_future_price(symbol, interval='2h', days=30):
-    try:
-        df = fetch_historical_data(symbol, interval, days)
-        if df is None or len(df) < 50: return None
-        df['ema_fast'] = calculate_ema(df['close'], 10)
-        df['ema_slow'] = calculate_ema(df['close'], 30)
-        df['rsi'] = calculate_rsi_indicator(df)
-        df = df.dropna()
-        if len(df) < 2: return None
-        features = ['ema_fast', 'ema_slow', 'rsi']
-        if not all(f in df.columns for f in features): return None
-        X = df[features].iloc[:-1].values
-        y = df['close'].iloc[1:].values
-        if len(X) == 0: return None
-        model = GradientBoostingRegressor(n_estimators=100, max_depth=3, random_state=42, learning_rate=0.1)
-        model.fit(X, y)
-        last_features = df[features].iloc[-1].values.reshape(1, -1)
-        predicted_price = model.predict(last_features)[0]
-        if predicted_price <= 0: return None
-        logger.info(f"✅ [Price Prediction] السعر المتوقع للزوج {symbol} ({interval}, {days} يوم): {predicted_price:.8f}")
-        return predicted_price
-    except ImportError:
-         logger.error("❌ [Price Prediction] مكتبة scikit-learn غير مثبتة. التنبؤ غير متاح.")
+# ---------------------- استراتيجية موجات إليوت ومستويات فيبوناتشي ----------------------
+def generate_signal_using_elliott_fibonacci_strategy(df_input, symbol):
+    """
+    تعتمد هذه الدالة على تحليل بيانات الشموع لتحديد:
+      - أقصى ارتفاع وأدنى انخفاض خلال فترة معينة (مثلاً آخر 50 شمعة)
+      - حساب مستويات فيبوناتشي بناءً على الفرق بين أعلى وأدنى سعر
+      - التحقق مما إذا كان السعر الحالي قريباً (ضمن هامش معين) من أحد مستويات فيبوناتشي،
+        مما يدل على احتمالية حدوث ارتداد وفقاً لمبدأ موجات إليوت (أي مرحلة تصحيحية).
+    في حال تحقق الشروط يتم توليد إشارة شراء.
+    """
+    if df_input is None or df_input.empty or len(df_input) < 20:
+         logger.warning(f"⚠️ [Signal Gen] بيانات غير كافية للزوج {symbol} لتحليل موجات إليوت ومستويات فيبوناتشي.")
          return None
-    except Exception as e:
-        logger.error(f"❌ [Price Prediction] خطأ أثناء التنبؤ بالسعر للزوج {symbol}: {e}")
-        return None
-
-# ---------------------- دالة توليد الإشارة باستخدام الاستراتيجية المحسنة ----------------------
-def generate_signal_using_freqtrade_strategy(df_input, symbol):
-    if df_input is None or df_input.empty:
-        logger.warning(f"⚠️ [Signal Gen] تم توفير DataFrame فارغ للزوج {symbol}.")
-        return None
-    if len(df_input) < 50:
-         logger.info(f"ℹ️ [Signal Gen] بيانات غير كافية ({len(df_input)} شمعة) للزوج {symbol} على فريم {SIGNAL_GENERATION_TIMEFRAME}.")
+    analysis_df = df_input.copy()
+    # استخدام آخر N شموع لتحليل السلوك السعري
+    N = min(50, len(analysis_df))
+    recent_data = analysis_df.tail(N)
+    recent_high = recent_data['high'].max()
+    recent_low = recent_data['low'].min()
+    if recent_high == recent_low:
+         logger.warning(f"⚠️ [Signal Gen] لا يوجد تباين في الأسعار للزوج {symbol}، لا يمكن حساب مستويات فيبوناتشي.")
          return None
-    strategy = FreqtradeStrategy()
-    df_processed = strategy.populate_indicators(df_input.copy())
-    if df_processed.empty:
-        logger.warning(f"⚠️ [Signal Gen] DataFrame فارغ بعد حساب المؤشرات للزوج {symbol}.")
-        return None
-    df_with_signals = strategy.populate_buy_trend(df_processed)
-    if df_with_signals.empty or df_with_signals['buy'].iloc[-1] != 1:
-        return None
-    last_signal_row = df_with_signals.iloc[-1]
-    current_price = last_signal_row['close']
-    current_atr = last_signal_row['atr']
-    if pd.isna(current_price) or pd.isna(current_atr) or current_atr <= 0 or current_price <= 0:
-        logger.warning(f"⚠️ [Signal Gen] سعر ({current_price}) أو ATR ({current_atr}) غير صالح في صف الإشارة للزوج {symbol}.")
-        return None
-    initial_target = current_price + (ENTRY_ATR_MULTIPLIER * current_atr)
-    initial_stop_loss = current_price - (ENTRY_ATR_MULTIPLIER * current_atr)
-    if initial_stop_loss <= 0:
-        min_sl_price = current_price * 0.95
-        initial_stop_loss = max(min_sl_price, 1e-9)
-        logger.warning(f"⚠️ [Signal Gen] وقف الخسارة الأولي للزوج {symbol} كان غير موجب. تم تعديله إلى: {initial_stop_loss:.8f}")
-    profit_margin_pct = ((initial_target / current_price) - 1) * 100 if current_price > 0 else 0
-    if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
-        logger.info(f"ℹ️ [Signal Gen] تم رفض إشارة {symbol}. هامش الربح ({profit_margin_pct:.2f}%) أقل من الحد الأدنى ({MIN_PROFIT_MARGIN_PCT:.1f}%).")
-        return None
-    buy_score = last_signal_row.get('buy_score', 0)
-    signal = {
-        'symbol': symbol,
-        'entry_price': float(f"{current_price:.8f}"),
-        'initial_target': float(f"{initial_target:.8f}"),
-        'initial_stop_loss': float(f"{initial_stop_loss:.8f}"),
-        'current_target': float(f"{initial_target:.8f}"),
-        'current_stop_loss': float(f"{initial_stop_loss:.8f}"),
-        'strategy': 'freqtrade_improved_atr',
-        'indicators': {
-            'rsi': round(last_signal_row['rsi'], 2) if 'rsi' in last_signal_row and pd.notna(last_signal_row['rsi']) else None,
-            'macd_hist': round(last_signal_row['macd_hist'], 5) if 'macd_hist' in last_signal_row and pd.notna(last_signal_row['macd_hist']) else None,
-            'adx': round(last_signal_row['adx'], 2) if 'adx' in last_signal_row and pd.notna(last_signal_row['adx']) else None,
-            'atr': round(current_atr, 8),
-            'buy_score': round(buy_score, 2)
-        },
-        'r2_score': round(buy_score, 2),
-        'trade_value': TRADE_VALUE,
+    # حساب مستويات فيبوناتشي لتحركات صاعدة (تفترض وجود اتجاه صعودي سابق)
+    fib_levels = {
+         '23.6': recent_high - (recent_high - recent_low) * 0.236,
+         '38.2': recent_high - (recent_high - recent_low) * 0.382,
+         '50.0': recent_high - (recent_high - recent_low) * 0.5,
+         '61.8': recent_high - (recent_high - recent_low) * 0.618,
+         '78.6': recent_high - (recent_high - recent_low) * 0.786,
     }
-    logger.info(f"✅ [Signal Gen] تم توليد إشارة شراء للزوج {symbol} عند سعر {current_price:.8f} (الدرجة: {buy_score:.2f}).")
+    current_price = analysis_df['close'].iloc[-1]
+    # تحديد ما إذا كان السعر الحالي قريباً من أحد مستويات فيبوناتشي (ضمن هامش 1% من السعر)
+    tolerance = current_price * 0.01
+    target_level = None
+    for level_name, level_value in fib_levels.items():
+         if abs(current_price - level_value) <= tolerance:
+              target_level = level_value
+              selected_level = level_name
+              break
+    if target_level is None:
+         logger.info(f"ℹ️ [Signal Gen] السعر الحالي {current_price:.8f} ليس قريباً من مستويات فيبوناتشي للزوج {symbol}.")
+         return None
+    # تطبيق مفهوم موجات إليوت: نفترض أن السعر الآن في مرحلة تصحيحية
+    # تحديد سعر الدخول عند السعر الحالي، والهدف عند مستوى فيبوناتشي أعلى من السعر الحالي
+    entry_price = current_price
+    sorted_levels = sorted(fib_levels.items(), key=lambda x: x[1])
+    target_price = None
+    for lvl_name, lvl_value in sorted_levels:
+         if lvl_value > current_price:
+              target_price = lvl_value
+              break
+    if target_price is None:
+         target_price = recent_high
+    # تحديد وقف الخسارة أسفل مستوى فيبوناتشي الحالي أو أقل بقليل من أدنى سعر حديث
+    stop_loss_price = min(current_price - tolerance, recent_low)
+    if stop_loss_price <= 0:
+         stop_loss_price = recent_low * 0.99
+    profit_margin_pct = ((target_price / entry_price) - 1) * 100
+    if profit_margin_pct < MIN_PROFIT_MARGIN_PCT:
+         logger.info(f"ℹ️ [Signal Gen] هامش الربح للزوج {symbol} ({profit_margin_pct:.2f}%) أقل من الحد الأدنى.")
+         return None
+    signal = {
+         'symbol': symbol,
+         'entry_price': float(f"{entry_price:.8f}"),
+         'initial_target': float(f"{target_price:.8f}"),
+         'initial_stop_loss': float(f"{stop_loss_price:.8f}"),
+         'current_target': float(f"{target_price:.8f}"),
+         'current_stop_loss': float(f"{stop_loss_price:.8f}"),
+         'strategy': 'elliott_fibonacci',
+         'indicators': {
+              'recent_high': recent_high,
+              'recent_low': recent_low,
+              'selected_fib_level': selected_level,
+              'selected_fib_value': round(target_level, 8),
+         },
+         'r2_score': 0,  # غير مطبق هنا
+         'trade_value': TRADE_VALUE,
+    }
+    logger.info(f"✅ [Signal Gen] تم توليد إشارة شراء (موجات إليوت وفيبوناتشي) للزوج {symbol} عند سعر {entry_price:.8f}.")
     return signal
+
+# ---------------------- دوال حفظ نسب الاستحواذ ----------------------
+def save_market_dominance():
+    try:
+        check_db_connection()
+        btc_dominance, eth_dominance = calculate_market_dominance()
+        cur.execute(
+            "INSERT INTO market_dominance (btc_dominance, eth_dominance) VALUES (%s, %s)",
+            (btc_dominance, eth_dominance)
+        )
+        conn.commit()
+        logger.info(f"✅ [Market Dominance] تم حفظ نسب الاستحواذ - BTC: {btc_dominance:.2f}%, ETH: {eth_dominance:.2f}%")
+    except Exception as e:
+        logger.error(f"❌ [Market Dominance] خطأ في حفظ نسب الاستحواذ: {e}", exc_info=True)
+        if conn and not conn.closed:
+            conn.rollback()
 
 # ---------------------- إعداد تطبيق Flask ----------------------
 app = Flask(__name__)
@@ -601,11 +506,11 @@ def webhook():
              user_id = user_info.get("id")
              username = user_info.get("username", "N/A")
              command = text.lower()
-             if command == '/report' or command == '/stats' or command == '/تقرير':
+             if command in ['/report', '/stats', '/تقرير']:
                   logger.info(f"ℹ️ [Webhook] تم استلام الأمر '{text}' من المستخدم @{username} (ID: {user_id}) في الدردشة {chat_id_msg}.")
                   Thread(target=send_report, args=(chat_id_msg,), daemon=True).start()
                   return '', 200
-             elif command == '/status' or command == '/الحالة':
+             elif command in ['/status', '/الحالة']:
                  logger.info(f"ℹ️ [Webhook] تم استلام الأمر '{text}' من المستخدم @{username} (ID: {user_id}) في الدردشة {chat_id_msg}.")
                  ws_status = 'نعم' if websocket_thread and websocket_thread.is_alive() else 'لا'
                  tracker_status = 'نعم' if tracker_thread and tracker_thread.is_alive() else 'لا'
@@ -641,7 +546,7 @@ def set_telegram_webhook():
              return
         webhook_url = f"{webhook_base_url.rstrip('/')}/webhook"
     else:
-         webhook_url = f"https://{render_service_name}.onrender.com/webhook"
+         webhook_url = f"https://four-3-9w83.onrender.com/webhook"
     set_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook"
     params = {'url': webhook_url}
     try:
@@ -680,7 +585,7 @@ def get_crypto_symbols(filename='crypto_list.txt'):
         logger.error(f"❌ [Data] خطأ في قراءة ملف الرموز '{filename}': {e}")
         return []
 
-def fetch_historical_data(symbol, interval='1h', days=10):
+def fetch_historical_data(symbol, interval='5m', days=SIGNAL_GENERATION_LOOKBACK_DAYS):
     try:
         start_str = f"{days} day ago UTC"
         klines = client.get_historical_klines(symbol, interval, start_str)
@@ -721,7 +626,6 @@ def fetch_recent_volume(symbol):
 
 # ---------------------- دمج Gemini API ----------------------
 def get_gemini_volume(pair):
-    """يجلب بيانات التيكر من Gemini API للزوج المحدد."""
     try:
         url = f"https://api.gemini.com/v1/pubticker/{pair}"
         response = requests.get(url, timeout=10)
@@ -735,7 +639,6 @@ def get_gemini_volume(pair):
         return 0.0
 
 def calculate_market_dominance():
-    """يحساب نسب الاستحواذ باستخدام بيانات Gemini API للزوجين BTCUSD و ETHUSD."""
     btc_volume = get_gemini_volume("BTCUSD")
     eth_volume = get_gemini_volume("ETHUSD")
     total_volume = btc_volume + eth_volume
@@ -764,7 +667,7 @@ def send_telegram_alert(signal, volume, btc_dominance, eth_dominance, timeframe)
         fng_value, fng_label = get_fear_greed_index()
         safe_symbol = signal['symbol'].replace('_', '\\_').replace('*', '\\*').replace('[', '\\[').replace('`', '\\`')
         message = (
-            f"🚀 **hamza توصية تداول جديدة للبوت** 🚀\n"
+            f"🚀 **4\\_3 توصية تداول جديدة للبوت** 🚀\n"
             f"——————————————\n"
             f"🪙 **الزوج:** `{safe_symbol}`\n"
             f"📈 **سعر الدخول المقترح:** `${entry_price:.8f}`\n"
@@ -834,6 +737,35 @@ def send_telegram_message(chat_id_target, text, reply_markup=None, parse_mode='M
         logger.error(f"❌ [Telegram] خطأ غير متوقع عند إرسال رسالة إلى الدردشة {chat_id_target}: {e}")
         raise
 
+def get_fear_greed_index():
+    try:
+        url = "https://api.alternative.me/fng/?limit=1&format=json"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("data"):
+            fng_value = float(data["data"][0].get("value", 50))
+            fng_classification_en = data["data"][0].get("value_classification", "Neutral")
+            fng_translations = {
+                "Extreme Fear": "خوف شديد",
+                "Fear": "خوف",
+                "Neutral": "محايد",
+                "Greed": "جشع",
+                "Extreme Greed": "جشع شديد"
+            }
+            fng_classification_ar = fng_translations.get(fng_classification_en, fng_classification_en)
+            logger.info(f"✅ [FNG] مؤشر الخوف والجشع: {fng_value:.0f} - {fng_classification_ar}")
+            return fng_value, fng_classification_ar
+        else:
+            logger.warning("⚠️ [FNG] لم يتم العثور على بيانات في استجابة مؤشر الخوف والجشع.")
+            return 50.0, "محايد"
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [FNG] خطأ في طلب مؤشر الخوف والجشع: {e}")
+        return 50.0, "خطأ"
+    except Exception as e:
+        logger.error(f"❌ [FNG] خطأ غير متوقع في جلب مؤشر الخوف والجشع: {e}")
+        return 50.0, "خطأ"
+
 # ---------------------- إرسال تقرير الأداء الشامل ----------------------
 def send_report(target_chat_id):
     logger.info(f"⏳ [Report] جاري إنشاء تقرير الأداء للدردشة: {target_chat_id}")
@@ -879,7 +811,7 @@ def send_report(target_chat_id):
         profit_factor = abs(total_profit_usd / total_loss_usd) if total_loss_usd != 0 else float('inf')
         timestamp = (datetime.utcnow() + timedelta(hours=3)).strftime('%Y-%m-%d %H:%M')
         report_message = (
-            f"📊 **Hamza تقرير أداء البوت** ({timestamp} توقيت +3)\n"
+            f"📊 **4\\_3 تقرير أداء البوت** ({timestamp} توقيت +3)\n"
             f"——————————————\n"
             f"**ملخص الصفقات المغلقة ({total_closed_trades}):**\n"
             f"  ✅ تحقيق الهدف: {successful_target_hits}\n"
@@ -1007,7 +939,7 @@ def track_signals():
                 if df_track is None or df_track.empty or len(df_track) < 20:
                     logger.warning(f"⚠️ [Tracker] بيانات {SIGNAL_TRACKING_TIMEFRAME} غير كافية لحساب ATR للزوج {symbol}. تخطي تحديث الوقف المتحرك.")
                 else:
-                    df_track = calculate_atr_indicator(df_track, period=14)
+                    df_track = calculate_atr_indicator(df_track, period=7)
                     if 'atr' not in df_track.columns or df_track['atr'].iloc[-1] is None or pd.isna(df_track['atr'].iloc[-1]):
                          logger.warning(f"⚠️ [Tracker] فشل في حساب ATR للزوج {symbol} على فريم {SIGNAL_TRACKING_TIMEFRAME}.")
                     else:
@@ -1048,13 +980,11 @@ def track_signals():
 
 # ---------------------- تحليل السوق ----------------------
 def analyze_market():
-    """يحلل السوق بحثًا عن فرص تداول جديدة بناءً على الاستراتيجية المحددة."""
     logger.info("==========================================")
     logger.info(f" H [Market Analysis] بدء دورة تحليل السوق (الفريم: {SIGNAL_GENERATION_TIMEFRAME}, بيانات: {SIGNAL_GENERATION_LOOKBACK_DAYS} يوم)...")
     if not can_generate_new_recommendation():
         logger.info(" H [Market Analysis] تم تخطي الدورة: تم الوصول للحد الأقصى للصفقات المفتوحة.")
         return
-    # استخدام Gemini API لحساب نسب الاستحواذ بدلاً من CoinGecko
     btc_dominance, eth_dominance = calculate_market_dominance()
     if btc_dominance is None or eth_dominance is None:
         logger.warning("⚠️ [Market Analysis] فشل في جلب نسب سيطرة السوق من Gemini. المتابعة بالقيم الافتراضية (0.0).")
@@ -1082,7 +1012,8 @@ def analyze_market():
         df_signal_gen = fetch_historical_data(symbol, interval=SIGNAL_GENERATION_TIMEFRAME, days=SIGNAL_GENERATION_LOOKBACK_DAYS)
         if df_signal_gen is None or df_signal_gen.empty:
             continue
-        signal = generate_signal_using_freqtrade_strategy(df_signal_gen, symbol)
+        # استخدام استراتيجية موجات إليوت ومستويات فيبوناتشي بدلاً من الاستراتيجيات السابقة
+        signal = generate_signal_using_elliott_fibonacci_strategy(df_signal_gen, symbol)
         if signal:
             try:
                 cur.execute("""
@@ -1100,7 +1031,6 @@ def analyze_market():
     logger.info(f"✅ [Market Analysis] تم توليد {generated_signals_count} إشارة/إشارات جديدة من {processed_symbols_count} زوج.")
 
 def can_generate_new_recommendation():
-    """تتحقق مما إذا كان يمكن توليد توصية جديدة بناءً على حد MAX_OPEN_TRADES."""
     try:
         check_db_connection()
         cur.execute("SELECT COUNT(*) FROM signals WHERE closed_at IS NULL")
@@ -1123,7 +1053,9 @@ if __name__ == '__main__':
         logger.critical(f"❌ [Main] فشل تهيئة قاعدة البيانات: {e}")
         exit(1)
     set_telegram_webhook()
-    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=5000), name="FlaskThread", daemon=True)
+    # قراءة المنفذ من متغير البيئة PORT، افتراضي 5000
+    port = int(os.environ.get("PORT", 5000))
+    flask_thread = Thread(target=lambda: app.run(host="0.0.0.0", port=port), name="FlaskThread", daemon=True)
     flask_thread.start()
     logger.info("✅ [Main] تم بدء خيط خادم Flask.")
     time.sleep(2)
@@ -1135,10 +1067,11 @@ if __name__ == '__main__':
     tracker_thread = Thread(target=track_signals, name="TrackerThread", daemon=True)
     tracker_thread.start()
     logger.info("✅ [Main] تم بدء خيط تتبع التوصيات.")
-    # يمكن إضافة مهام مجدولة أخرى هنا
     scheduler = BackgroundScheduler(timezone="UTC")
     scheduler.add_job(analyze_market, 'interval', minutes=5, id='market_analyzer', replace_existing=True, misfire_grace_time=60)
-    logger.info("✅ [Main] تم جدولة مهمة تحليل السوق (كل 5 دقائق).")
+    # مهمة لحفظ نسب الاستحواذ كل ساعة
+    scheduler.add_job(save_market_dominance, 'interval', minutes=60, id='market_dominance', replace_existing=True, misfire_grace_time=60)
+    logger.info("✅ [Main] تم جدولة مهام تحليل السوق (كل 5 دقائق) وحفظ نسب الاستحواذ (كل ساعة).")
     scheduler.start()
     logger.info("✅ [Main] تم بدء تشغيل APScheduler.")
     logger.info("==========================================")
