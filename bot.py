@@ -546,7 +546,7 @@ def set_telegram_webhook():
              return
         webhook_url = f"{webhook_base_url.rstrip('/')}/webhook"
     else:
-         webhook_url = f"https://four-3-9w83.onrender.com/webhook"
+         webhook_url = f"https://hamza-o84o.onrender.com/webhook"
     set_url = f"https://api.telegram.org/bot{telegram_token}/setWebhook"
     params = {'url': webhook_url}
     try:
