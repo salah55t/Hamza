@@ -46,10 +46,10 @@ TRADE_VALUE = 10  # قيمة الصفقة الثابتة بالدولار
 MAX_OPEN_TRADES = 4  # الحد الأقصى للصفقات المفتوحة
 
 # تعديل الفريمات لتناسب توصيات فريم 5 دقائق
-SIGNAL_GENERATION_TIMEFRAME = '5m'  # فريم توليد التوصيات أصبح 5 دقائق
-SIGNAL_GENERATION_LOOKBACK_DAYS = 1  # فترة بيانات يوم واحد
-SIGNAL_TRACKING_TIMEFRAME = '5m'    # فريم تتبع التوصيات أصبح 5 دقائق
-SIGNAL_TRACKING_LOOKBACK_DAYS = 1
+SIGNAL_GENERATION_TIMEFRAME = '30m'  # فريم توليد التوصيات أصبح 5 دقائق
+SIGNAL_GENERATION_LOOKBACK_DAYS = 5  # فترة بيانات يوم واحد
+SIGNAL_TRACKING_TIMEFRAME = '30m'    # فريم تتبع التوصيات أصبح 5 دقائق
+SIGNAL_TRACKING_LOOKBACK_DAYS = 5
 
 # إعدادات وقف الخسارة المتحرك (ATR Trailing Stop)
 TRAILING_STOP_ACTIVATION_PROFIT_PCT = 0.015
